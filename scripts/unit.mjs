@@ -854,6 +854,37 @@ check(fromHome.filter((c) => c.client === "cursor").length === 1, "candidates: t
 const fromProject = clientConfigCandidates({ platform: "win32", homedir: "C:\\Users\\test", cwd: "C:\\proj" });
 check(fromProject.filter((c) => c.client === "cursor").length === 2, "candidates: distinct global and project files are both listed");
 
+// A home folder behind a link (macOS temp folders, a home kept on another
+// volume): the working folder comes back as the real path, so the same file
+// arrives under two spellings.
+{
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "discord-mcp-link-"));
+  try {
+    const real = path.join(root, "real");
+    const link = path.join(root, "link");
+    const other = path.join(root, "other");
+    fs.mkdirSync(real);
+    fs.mkdirSync(other);
+    fs.symlinkSync(real, link, "junction");
+    const cursorIn = (homedir, cwd) =>
+      clientConfigCandidates({ platform: process.platform, homedir, cwd }).filter((c) => c.client === "cursor");
+
+    check(cursorIn(link, real).length === 1, "candidates: one file is listed once before it exists, with home behind a link");
+    fs.mkdirSync(path.join(real, ".cursor"));
+    fs.writeFileSync(path.join(real, ".cursor", "mcp.json"), "{}\n");
+    const viaLink = cursorIn(link, real);
+    check(viaLink.length === 1 && viaLink[0].exists, "candidates: one file is listed once, with home behind a link");
+    check(viaLink[0]?.path === path.join(link, ".cursor", "mcp.json"), "candidates: the path stays as the home folder spells it");
+    check(viaLink[0]?.label === "Cursor (global)", "candidates: the global label keeps the file");
+    check(cursorIn(link, other).length === 2, "candidates: a project elsewhere is still listed next to a linked home");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const macCandidates = clientConfigCandidates({
   platform: "darwin",
   homedir: "/Users/test",

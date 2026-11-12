@@ -1,5 +1,5 @@
-import { existsSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { PermissionFlagsBits } from "discord-api-types/v10";
 import { PERMISSION_PRESETS } from "./discord/preflight.js";
 
@@ -264,6 +264,24 @@ export interface ConfigCandidate {
   appPresent: boolean;
 }
 
+// Where a path really is, with any links in it followed. The file may not
+// exist yet, so the nearest folder that does is followed and the rest is
+// kept as written.
+function realLocation(p: string): string {
+  let head = resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...tail);
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) return resolve(p);
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+}
+
 // Known client config locations. For each, the wizard records whether the
 // config file exists and whether the client looks installed (its config
 // directory is present), so it can offer a client even before that client
@@ -284,10 +302,12 @@ export function clientConfigCandidates(env: {
   // Run from the home folder, a project-scoped path can be the very same
   // file as a global one (Cursor's ~/.cursor/mcp.json, for one). Listing it
   // twice would ask about and write the same file twice, so the first label
-  // keeps it. Windows paths compare without case.
+  // keeps it. Links are followed first: with a home folder behind one, the
+  // working folder comes back as the real path and the same file arrives
+  // under two spellings. Windows paths compare without case.
   const key = (p: string) => {
-    const resolved = resolve(p);
-    return env.platform === "win32" ? resolved.toLowerCase() : resolved;
+    const real = realLocation(p);
+    return env.platform === "win32" ? real.toLowerCase() : real;
   };
   const push = (client: string, label: string, path: string) => {
     if (out.some((c) => key(c.path) === key(path))) return;
