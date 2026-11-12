@@ -15,6 +15,10 @@ export interface Resolvable {
   // Extra display context for disambiguation, like a channel's category
   // or a member's nickname.
   context?: string;
+  // Other names the item answers to, scored like the name itself. A member
+  // has three (username, display name, server nickname), and people are
+  // asked for by the one that shows, which is rarely the username.
+  aliases?: string[];
 }
 
 export interface Candidate extends Resolvable {
@@ -33,17 +37,23 @@ export function rankCandidates(
   const norm = normalize(trimmed);
   const out: Candidate[] = [];
 
+  const scoreName = (name: string): number => {
+    if (name === trimmed) return 90;
+    const itemNorm = normalize(name);
+    if (itemNorm === norm) return 80;
+    if (norm.length > 0 && itemNorm.startsWith(norm)) return 70;
+    if (norm.length > 1 && itemNorm.includes(norm)) return 60;
+    return 0;
+  };
   for (const item of items) {
     let score = 0;
     if (SNOWFLAKE.test(trimmed) && item.id === trimmed) {
       score = 100;
-    } else if (item.name === trimmed) {
-      score = 90;
     } else {
-      const itemNorm = normalize(item.name);
-      if (itemNorm === norm) score = 80;
-      else if (norm.length > 0 && itemNorm.startsWith(norm)) score = 70;
-      else if (norm.length > 1 && itemNorm.includes(norm)) score = 60;
+      // The best of its names.
+      for (const name of [item.name, ...(item.aliases ?? [])]) {
+        if (name) score = Math.max(score, scoreName(name));
+      }
     }
     if (score > 0) out.push({ ...item, score });
   }
@@ -57,6 +67,28 @@ export function rankCandidates(
 export type Resolution =
   | { match: Candidate }
   | { candidates: Candidate[] };
+
+// Picking a person. Stricter than resolveOne, because the wrong channel
+// shows in a preview while the wrong person reads like the right one: when
+// two people both carry the name exactly (in any letter case, as username,
+// display name, or nickname), nobody is picked. "truncated" says the list
+// may not hold everyone who matches; then only an exact name is trusted,
+// since a better match may be among the ones not returned.
+export function resolvePerson(
+  query: string,
+  items: Resolvable[],
+  truncated = false
+): Resolution {
+  const ranked = rankCandidates(query, items);
+  if (ranked.length === 0) return { candidates: [] };
+  const exact = ranked.filter((c) => c.score >= 80);
+  if (exact.length === 1) return { match: exact[0] };
+  if (exact.length > 1) return { candidates: exact.slice(0, 5) };
+  if (!truncated && (ranked.length === 1 || ranked[0].score > ranked[1].score)) {
+    return { match: ranked[0] };
+  }
+  return { candidates: ranked.slice(0, 5) };
+}
 
 export function resolveOne(query: string, items: Resolvable[]): Resolution {
   const ranked = rankCandidates(query, items);

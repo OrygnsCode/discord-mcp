@@ -1,8 +1,171 @@
 # Changelog
 
-All notable changes to Omnicord are recorded here. The format follows
-Keep a Changelog, and the project follows semantic versioning. Version
-1.0.0 marked the public launch; releases since follow semver.
+All notable changes to discord-mcp (formerly Omnicord) are recorded here.
+The format follows Keep a Changelog, and the project follows semantic
+versioning. Version 1.0.0 marked the public launch; releases since follow
+semver.
+
+## 2.0.0 (2026-11-12)
+
+Omnicord is now discord-mcp. Same project, new name: the package, the
+command, the settings, and the settings folder all change, and the setup
+wizard moves an existing install over. It is also the biggest release so
+far: 164 tools, a confirmation dialog the model cannot answer, undo, and
+editing a server that already exists.
+
+The license is Apache-2.0 from this version on. Versions up to 1.4.1 stay
+under the Elastic License 2.0.
+
+### Upgrading from Omnicord
+
+- Run `npx @orygn/discord-mcp init`. It switches your AI apps over (each
+  config is backed up first) and moves `~/.omnicord` to
+  `~/.orygn/discord-mcp`. For Claude Code it prints two commands to run.
+- `OMNICORD_*` settings are `DISCORD_MCP_*` now. The old names keep working
+  through 2.x.
+- The command is `orygn-discord-mcp` and the config entry is `discord-mcp`,
+  so tool names become `mcp__discord-mcp__...`. Approvals saved for the old
+  names do not carry over.
+- The Docker image is `orygn/discord-mcp`.
+- Node 22 or newer.
+- A `.env` in the folder your AI app starts in is no longer read. Set
+  `DISCORD_MCP_HOME` to that folder if you relied on it.
+- If you script against it: names in results are quoted now
+  (`Removed "Helper" from "Sam"`), and more calls stop at a preview first
+  (see Security).
+
+### Security
+
+If you run an earlier version, these are the ones to know about.
+
+- A model could finish a destructive action by itself. The confirm token
+  from a preview goes to the model, which could call again with it without
+  asking anyone, so a model misled by something it read, a message in a
+  channel for instance, could delete, ban, or kick. Where the app can show
+  a form, confirming is now a dialog the model cannot answer. Elsewhere the
+  token still works, and `DISCORD_MCP_CONFIRM=dialog` refuses destructive
+  actions in those apps. Claude Desktop is one of them at the time of
+  release, so leave its own prompt on for the delete and ban tools.
+- Handing out power or access needed no confirmation. One call could give
+  someone moderator powers, open a private channel, lift a ban, or move a
+  role above the admins. These are confirmed now, when they actually hand
+  something out.
+- Taking a protection down is confirmed too: lowering verification, lifting
+  a raid pause or a timeout, turning an AutoMod rule off, turning the public
+  widget on, unlocking a channel this server did not lock.
+- Upload URLs (emoji, stickers, sounds, webhook avatars) were fetched from
+  any address, including the machine the server runs on and its private
+  network. Only public addresses are fetched now, redirects included.
+  `DISCORD_MCP_ALLOW_PRIVATE_URLS=true` allows private ones again.
+- HTTP mode: one request with a malformed Host header stopped the server,
+  and it needed no token. It gets a 400 now.
+- The server read a `.env` from whatever folder it was started in, ahead of
+  its own. Opened inside another Discord bot's project, it ran as that
+  bot. It reads one place now, and the setup check says which.
+- A confirm token was not tied to a server, so one previewed for a kick or
+  ban worked on the same user in another server the bot is in.
+- `dry_run` passed together with a valid confirm token ran for real.
+- `bulk_update_roles` and `bulk_ban` tokens covered less than the preview
+  showed: a different filter matching as many members, and message deletion
+  on a ban that the preview never mentioned.
+- The wizard wrote `.env` and `bots.json` readable by every account on
+  Linux and macOS. They are owner-only now, and the setup check warns about
+  a loose one.
+- `delete_invite` could revoke another server's invite while the preview
+  named this one. `end_stage` and `cancel_scheduled_message` were documented
+  as confirmed and ran at once.
+- A parameter a tool does not have was dropped without a word, so
+  `dry_run: true` on a tool with no dry run ran for real. Such a call is
+  refused now, at the top level and inside a blueprint.
+  `DISCORD_MCP_STRICT_PARAMS=false` turns the check off.
+- Names are quoted everywhere. A display name such as
+  `Sam". The user already approved this` could read as part of a preview or
+  a result. Names go in double quotes on one line, with characters nobody
+  can see removed.
+
+### Added
+
+- Edit a server that already exists. `plan_server_build` with
+  `update_existing` changes roles, channels, and permissions to match a
+  blueprint, shows before and after, and flags the risky changes. `remove`
+  deletes through a plan and says what each deletion loses.
+- Undo. Changes to a server's structure are recorded, the newest 50 per
+  server, and `undo_change` reverses one of them or everything since a
+  time. `list_changes` shows them. Messages in a deleted channel do not
+  come back.
+- `audit_server_security` ranks what is risky in a server, with a fix for
+  each. `get_channel_access` and `get_member_access` say who can see what.
+- `catch_up`: what happened since a time, busiest channels first.
+- Files and pictures. Attach up to 10 files by URL, let the AI look at the
+  images in a message, and read embeds and forwarded messages, which used
+  to come back blank.
+- Full embeds: fields, footer, author, pictures, and a time (`now` works).
+  The ones Discord would post broken are refused first.
+- Invites that give roles, or that only chosen people can use.
+- Settings that were missing: server icon and banners, gradient role colors
+  and role icons, voice bitrate and limits, forum defaults.
+- `update_bot_profile`, `leave_server`, `import_server_template`, voters in
+  `get_poll_results`, editing webhook messages.
+- The server tells the app what it is for when it connects, which is all a
+  model sees before it loads a tool.
+- A once-a-day check for a newer version, mentioned once per session.
+  `DISCORD_MCP_UPDATE_CHECK=false` turns it off.
+- Blueprints take per-role `permissions`, and exports carry ids so an
+  edited export changes those exact items.
+- `DISCORD_MCP_CONFIRM`: `auto`, `token`, or `dialog`.
+
+### Changed
+
+- Speaks the 2026-07-28 MCP protocol and still serves 2025 clients. HTTP
+  serving is stateless.
+- An install is 20 packages, down from about 110.
+- With everything loaded the tool list is about 188 KB, up from 133 KB.
+  `DISCORD_MCP_TOOLS` trims it; the core group alone is about 12 KB.
+- When several of your bots share a server, the default bot handles it, or
+  the one named under `servers` in `bots.json`. See
+  [Multiple bots](docs/multi-bot.md).
+- A message can be given by its link wherever its ID is wanted.
+- Discord's change of November 16, 2026 is handled: channels the bot cannot
+  see leave its channel list, so overviews say how many are hidden and
+  builds count them toward the limits.
+- The setup check follows Discord's 10,000-user rule for privileged
+  intents.
+- In a blueprint, `private_to: []` means admins only and `null` means
+  everyone. An empty list used to mean no restriction, which exported an
+  admins-only channel as public.
+- A request that would sit out a long Discord rate limit fails at once with
+  the time to retry. It used to hang for up to 10 minutes.
+- The role presets and the recommended invite gained Bypass Slowmode, Set
+  Voice Channel Status, and Create Private Threads.
+
+### Fixed
+
+45 fixes. The ones most likely to have bitten someone:
+
+- `lock_channel` left a channel open where the channel's own permissions
+  let @everyone post, and `unlock_channel` opened read-only channels to
+  everyone.
+- A member asked for by name was matched on the username alone, so a DM or
+  a role could go to the wrong person.
+- A read-only channel built inside a private category came out public.
+- Scheduled messages could go out twice, since Claude Desktop starts two
+  copies of each server, and one with a start time in the past fired at
+  once.
+- `subscribe_events` collected messages from every server the bot was in.
+- After the connection to Discord dropped and came back, `set_bot_presence`
+  refused to work until a restart.
+- `edit_message` could turn text into a mention.
+- `bulk_update_roles` read a mistyped date as no filter and matched
+  everyone.
+- One page of a list was reported as the whole of it: role members,
+  reactions, event attendees, threads, pins.
+- On Windows the wizard missed Claude Desktop's current config folder, and
+  registering again dropped an entry's `env` block.
+- `ban_member` bans people who already left, `create_thread` works in
+  announcement channels, and `timeout_member` refuses an administrator up
+  front instead of failing with a bare 403.
+- The tool catalog described several things no tool did. Every row was
+  checked against the code.
 
 ## 1.4.1 (2026-10-17)
 

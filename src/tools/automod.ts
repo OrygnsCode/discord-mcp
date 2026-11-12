@@ -9,10 +9,13 @@ import {
 } from "discord-api-types/v10";
 import type { APIAutoModerationRule } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { resolveOne } from "../discord/resolve.js";
+import { getRoles } from "../discord/guildData.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import { CONFIRM_STEPS } from "./grantGate.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -23,10 +26,11 @@ import {
   TEXT_BEARING_TYPES,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // AutoMod: Discord's server-side automatic moderation rules. These run on
-// Discord's infrastructure, so they keep working when Omnicord is offline.
+// Discord's infrastructure, so they keep working when this server is offline.
 
 const P = PermissionFlagsBits;
 
@@ -111,7 +115,7 @@ async function resolveRule(
 
 export function registerAutomodTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "list_automod_rules",
@@ -227,6 +231,27 @@ export function registerAutomodTools(
       if (actions.includes("alert") && !alert_channel) {
         return fail("The alert action needs an alert_channel.");
       }
+
+      // Exempt roles and channels by name or id, like every other
+      // reference. They used to go to Discord as written, so a name was
+      // refused as an invalid id.
+      const exemptRoleIds: string[] = [];
+      if (exempt_roles?.length) {
+        const roles = await getRoles(rest, guildId);
+        for (const ref of exempt_roles) {
+          const found = resolveOne(ref, roles.map((r) => ({ id: r.id, name: r.name, type: "role" })));
+          if (!("match" in found)) {
+            return fail(`No single role matches "${ref}" in exempt_roles. Nothing was created.`, {
+              candidates: "candidates" in found ? found.candidates : [],
+            });
+          }
+          exemptRoleIds.push(found.match.id);
+        }
+      }
+      const exemptChannelIds: string[] = [];
+      for (const ref of exempt_channels ?? []) {
+        exemptChannelIds.push((await resolveChannel(rest, guildId, ref)).id);
+      }
       if (actions.includes("timeout") && !timeout_minutes) {
         return fail("The timeout action needs timeout_minutes.");
       }
@@ -304,14 +329,14 @@ export function registerAutomodTools(
           },
           actions: builtActions,
           enabled: enabled ?? true,
-          ...(exempt_roles?.length ? { exempt_roles } : {}),
-          ...(exempt_channels?.length ? { exempt_channels } : {}),
+          ...(exemptRoleIds.length ? { exempt_roles: exemptRoleIds } : {}),
+          ...(exemptChannelIds.length ? { exempt_channels: exemptChannelIds } : {}),
         },
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as APIAutoModerationRule;
 
       return ok(
-        `AutoMod rule "${rule.name}" is live: ${trigger} trigger, ` +
+        `AutoMod rule ${quoted(rule.name)} is live: ${trigger} trigger, ` +
           `${actions.join(" + ")} action(s). It runs on Discord's side ` +
           "around the clock.",
         ruleDigest(rule)
@@ -324,7 +349,10 @@ export function registerAutomodTools(
     {
       title: "Update AutoMod rule",
       description:
-        "Rename a rule, enable or disable it, or replace its keyword list.",
+        "Rename a rule, enable or disable it, or replace its keyword list. " +
+        "Turning a rule off, or a new list that leaves out keywords the rule " +
+        `has now, stops it catching what it caught, so that needs confirming: ${CONFIRM_STEPS}. ` +
+        "Renaming, turning a rule on, and adding keywords happen at once.",
       inputSchema: {
         rule: z.string().describe("Rule name or ID."),
         guild: guildParam,
@@ -332,17 +360,18 @@ export function registerAutomodTools(
         enabled: z.boolean().optional(),
         keywords: z.array(z.string().max(60)).max(1000).optional()
           .describe("Replaces the keyword list on keyword rules."),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ rule, guild, name, enabled, keywords }) => {
+    guarded(async ({ rule, guild, name, enabled, keywords, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const perms = await botPermissions(rest, guildId);
       requirePermissions(perms, [[P.ManageGuild, "Manage Server"]], "in this server");
 
       const found = await resolveRule(rest, guildId, rule);
       const changes: string[] = [];
-      if (name !== undefined) changes.push(`name to "${name}"`);
+      if (name !== undefined) changes.push(`name to ${quoted(name)}`);
       if (enabled !== undefined) changes.push(enabled ? "enabled" : "disabled");
       if (keywords !== undefined) {
         if (found.trigger_type !== AutoModerationRuleTriggerType.Keyword) {
@@ -351,6 +380,34 @@ export function registerAutomodTools(
         changes.push(`${keywords.length} keyword(s)`);
       }
       if (changes.length === 0) return fail("Pass at least one field to change.");
+
+      // What the change would stop the rule doing. Keywords are compared the
+      // way Discord matches them, without regard to case.
+      const lowered: string[] = [];
+      if (enabled === false && found.enabled) {
+        lowered.push("turn it off, so nothing it catches now is caught until it is turned on again");
+      }
+      if (keywords !== undefined) {
+        const kept = new Set(keywords.map((k) => k.trim().toLowerCase()));
+        const dropped = (found.trigger_metadata?.keyword_filter ?? []).filter((k) => !kept.has(k.trim().toLowerCase()));
+        if (dropped.length > 0) {
+          const shown = dropped.slice(0, 5).map((k) => quoted(k)).join(", ");
+          lowered.push(
+            `take ${dropped.length} keyword(s) off it (${shown}${dropped.length > 5 ? `, and ${dropped.length - 5} more` : ""}), ` +
+              "so messages with them are no longer caught"
+          );
+        }
+      }
+      if (lowered.length > 0) {
+        const gate = gateDestructive({
+          tool: "update_automod_rule",
+          args: { rule: found.id, name: name ?? null, enabled: enabled ?? null, keywords: keywords ?? null },
+          confirmToken: confirm_token,
+          previewSummary: `Would change the AutoMod rule ${quoted(found.name)}: ${lowered.join("; and ")}.`,
+          previewDetails: { rule: { id: found.id, name: found.name, enabled: found.enabled }, changes },
+        });
+        if (gate) return gate;
+      }
 
       const updated = (await rest.patch(
         Routes.guildAutoModerationRule(guildId, found.id),
@@ -367,11 +424,11 @@ export function registerAutomodTools(
                 }
               : {}),
           },
-          reason: "Updated via Omnicord",
+          reason: "Updated via discord-mcp",
         }
       )) as APIAutoModerationRule;
 
-      return ok(`Updated the rule "${updated.name}": ${changes.join(", ")}.`, ruleDigest(updated));
+      return ok(`Updated the rule ${quoted(updated.name)}: ${changes.join(", ")}.`, ruleDigest(updated));
     })
   );
 
@@ -383,12 +440,13 @@ export function registerAutomodTools(
         "Delete an AutoMod rule; its protection stops immediately. Safe " +
         "to call directly: the first call changes nothing and returns a " +
         "preview plus a confirm_token; repeating the call with the token " +
-        "deletes it. Disabling is the reversible alternative.",
+        "deletes it. Turning it off with update_automod_rule is the " +
+        "reversible alternative.",
       inputSchema: {
         rule: z.string().describe("Rule name or ID."),
         guild: guildParam,
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -404,7 +462,7 @@ export function registerAutomodTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would delete the AutoMod rule "${found.name}" ` +
+          `Would delete the AutoMod rule ${quoted(found.name)} ` +
           `(${TRIGGER_LABELS[found.trigger_type]}); its protection stops ` +
           "immediately. Disabling it instead is reversible.",
         previewDetails: ruleDigest(found),
@@ -412,9 +470,9 @@ export function registerAutomodTools(
       if (gate) return gate;
 
       await rest.delete(Routes.guildAutoModerationRule(guildId, found.id), {
-        reason: "Deleted via Omnicord",
+        reason: "Deleted via discord-mcp",
       });
-      return ok(`Deleted the AutoMod rule "${found.name}".`, {
+      return ok(`Deleted the AutoMod rule ${quoted(found.name)}.`, {
         deleted: true,
         id: found.id,
       });

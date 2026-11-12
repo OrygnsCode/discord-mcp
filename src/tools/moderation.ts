@@ -12,8 +12,8 @@ import type {
   RESTGetAPIGuildBansResult,
   RESTPostAPIGuildBulkBanResult,
 } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { getRoles, getBotUser } from "../discord/guildData.js";
 import {
   computeGuildPermissions,
@@ -21,6 +21,8 @@ import {
   canModerate,
 } from "../discord/preflight.js";
 import { gateDestructive } from "../safety.js";
+import { plainText, quoted } from "../discord/names.js";
+import { CONFIRM_STEPS } from "./grantGate.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -31,6 +33,7 @@ import {
   ToolProblem,
   requirePermissions,
   botPermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // Moderation tools. Every punitive action (timeout, kick, ban, bulk ban)
@@ -48,6 +51,17 @@ const AUDIT_NAME_CODES = new Map<string, number>();
 for (const [key, value] of Object.entries(AuditLogEvent)) {
   if (typeof value === "number") {
     const snake = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+    AUDIT_EVENT_NAMES.set(value, snake);
+    AUDIT_NAME_CODES.set(snake.replace(/[^a-z0-9]/g, ""), value);
+  }
+}
+// Events Discord documented after the installed discord-api-types: channel
+// and role reordering, added 2026-10-29.
+for (const [value, snake] of [
+  [16, "channel_position_update"],
+  [33, "role_position_update"],
+] as const) {
+  if (!AUDIT_EVENT_NAMES.has(value)) {
     AUDIT_EVENT_NAMES.set(value, snake);
     AUDIT_NAME_CODES.set(snake.replace(/[^a-z0-9]/g, ""), value);
   }
@@ -93,12 +107,35 @@ async function preflightModeration(
   if (!verdict.ok) {
     throw new ToolProblem(fail(verdict.reason ?? "Moderation not allowed."));
   }
+  // Discord refuses to time out anyone with Administrator, whatever the
+  // role order (documented on Modify Guild Member). Said here, so the
+  // preview is not followed by a bare 403 once it is confirmed.
+  if (
+    action === "timeout" &&
+    (computeGuildPermissions(target.roles, guildId, roles) & P.Administrator) !== 0n
+  ) {
+    throw new ToolProblem(
+      fail(
+        `${quoted(memberDisplayName(target))} has Administrator, and Discord does not let an administrator be timed out. ` +
+          "Take the role that carries it first, or use kick or ban."
+      )
+    );
+  }
   return target;
+}
+
+// Discord takes a timeout of at most 28 days from its own clock. A machine
+// running a little fast would ask for a moment more than that at the
+// maximum and be refused, so the longest one ends a minute early.
+const MAX_TIMEOUT_MS = 28 * 24 * 60 * 60_000 - 60_000;
+
+export function timeoutEnd(durationMinutes: number, now: number = Date.now()): Date {
+  return new Date(now + Math.min(durationMinutes * 60_000, MAX_TIMEOUT_MS));
 }
 
 export function registerModerationTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "timeout_member",
@@ -117,7 +154,7 @@ export function registerModerationTools(
           .describe("Timeout length in minutes, up to 40320 (28 days)."),
         reason: z.string().max(400).optional(),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -138,14 +175,14 @@ export function registerModerationTools(
         "timeout"
       );
 
-      const until = new Date(Date.now() + duration_minutes * 60_000);
+      const until = timeoutEnd(duration_minutes);
       const gate = gateDestructive({
         tool: "timeout_member",
         args: { member: target.user!.id, duration_minutes },
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would time out ${memberDisplayName(target)} for ` +
+          `Would time out ${quoted(memberDisplayName(target))} for ` +
           `${duration_minutes} minute(s), until ${until.toISOString()}. ` +
           "They keep reading access but cannot talk, react, or join voice.",
         previewDetails: {
@@ -157,11 +194,11 @@ export function registerModerationTools(
 
       await rest.patch(Routes.guildMember(guildId, target.user!.id), {
         body: { communication_disabled_until: until.toISOString() },
-        reason: reason ?? "Timed out via Omnicord",
+        reason: reason ?? "Timed out via discord-mcp",
       });
 
       return ok(
-        `Timed out ${memberDisplayName(target)} until ${until.toISOString()}.`,
+        `Timed out ${quoted(memberDisplayName(target))} until ${until.toISOString()}.`,
         {
           member: { id: target.user!.id, name: memberDisplayName(target) },
           until: until.toISOString(),
@@ -174,15 +211,19 @@ export function registerModerationTools(
     "remove_timeout",
     {
       title: "Remove timeout",
-      description: "Lift an active timeout from a member early.",
+      description:
+        "Lift an active timeout from a member early. It puts someone a " +
+        `moderator silenced back in the conversation, so it needs confirming: ${CONFIRM_STEPS}. ` +
+        "A member who is not timed out is left alone, with nothing to confirm.",
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
         reason: z.string().max(400).optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ member, guild, reason }) => {
+    guarded(async ({ member, guild, reason, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveMember(rest, guildId, member);
       if (!target.user) return fail(`Could not load member "${member}".`);
@@ -192,16 +233,32 @@ export function registerModerationTools(
         new Date(target.communication_disabled_until) > new Date();
       if (!activelyTimedOut) {
         return ok(
-          `${memberDisplayName(target)} is not timed out. Nothing to do.`,
+          `${quoted(memberDisplayName(target))} is not timed out. Nothing to do.`,
           { changed: false }
         );
       }
 
+      // Discord writes its times with an offset; previews use one form.
+      const until = new Date(target.communication_disabled_until as string).toISOString();
+      const gate = gateDestructive({
+        tool: "remove_timeout",
+        args: { member: target.user.id },
+        confirmToken: confirm_token,
+        previewSummary:
+          `Would lift the timeout on ${quoted(memberDisplayName(target))}, which runs until ` +
+          `${until}. They could talk, react, and join voice again at once.`,
+        previewDetails: {
+          member: { id: target.user.id, name: memberDisplayName(target) },
+          timed_out_until: until,
+        },
+      });
+      if (gate) return gate;
+
       await rest.patch(Routes.guildMember(guildId, target.user.id), {
         body: { communication_disabled_until: null },
-        reason: reason ?? "Timeout removed via Omnicord",
+        reason: reason ?? "Timeout removed via discord-mcp",
       });
-      return ok(`Removed the timeout from ${memberDisplayName(target)}.`, {
+      return ok(`Removed the timeout from ${quoted(memberDisplayName(target))}.`, {
         changed: true,
         member: { id: target.user.id, name: memberDisplayName(target) },
       });
@@ -223,7 +280,7 @@ export function registerModerationTools(
         guild: guildParam,
         reason: z.string().max(400).optional(),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -243,8 +300,8 @@ export function registerModerationTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would kick ${memberDisplayName(target)} ` +
-          `(${target.user!.username}), a member since ${target.joined_at}. ` +
+          `Would kick ${quoted(memberDisplayName(target))} ` +
+          `(${plainText(target.user!.username)}), a member since ${target.joined_at}. ` +
           "Their messages stay; they can rejoin with a new invite.",
         previewDetails: {
           member: { id: target.user!.id, name: memberDisplayName(target) },
@@ -255,9 +312,9 @@ export function registerModerationTools(
       if (gate) return gate;
 
       await rest.delete(Routes.guildMember(guildId, target.user!.id), {
-        reason: reason ?? "Kicked via Omnicord",
+        reason: reason ?? "Kicked via discord-mcp",
       });
-      return ok(`Kicked ${memberDisplayName(target)} from the server.`, {
+      return ok(`Kicked ${quoted(memberDisplayName(target))} from the server.`, {
         kicked: true,
         member: { id: target.user!.id, name: memberDisplayName(target) },
       });
@@ -281,7 +338,7 @@ export function registerModerationTools(
         delete_message_seconds: z.number().int().min(0).max(604800).optional()
           .describe("Also delete their messages from the last N seconds, up to 604800 (7 days)."),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -302,7 +359,13 @@ export function registerModerationTools(
       try {
         member = await resolveMember(rest, guildId, user);
       } catch (err) {
-        if (!(err instanceof ToolProblem) || !SNOWFLAKE.test(user.trim())) {
+        // A user ID is looked up as a member, and Discord answers 404
+        // (Unknown Member) for anyone not in the server: that is the case a
+        // ban by ID is for.
+        const notFound =
+          err instanceof ToolProblem ||
+          (typeof err === "object" && err !== null && "status" in err && err.status === 404);
+        if (!notFound || !SNOWFLAKE.test(user.trim())) {
           throw err;
         }
         member = undefined;
@@ -356,7 +419,7 @@ export function registerModerationTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would ban ${targetLabel}` +
+          `Would ban ${inServer ? quoted(targetLabel) : targetLabel}` +
           (inServer ? "" : " (not currently in the server)") +
           `. They cannot rejoin until unbanned.${wipeNote}`,
         previewDetails: {
@@ -371,9 +434,9 @@ export function registerModerationTools(
         body: delete_message_seconds
           ? { delete_message_seconds }
           : {},
-        reason: reason ?? "Banned via Omnicord",
+        reason: reason ?? "Banned via discord-mcp",
       });
-      return ok(`Banned ${targetLabel}.`, { banned: true, user_id: targetId });
+      return ok(`Banned ${inServer ? quoted(targetLabel) : targetLabel}.`, { banned: true, user_id: targetId });
     })
   );
 
@@ -381,24 +444,52 @@ export function registerModerationTools(
     "unban_member",
     {
       title: "Unban member",
-      description: "Lift a ban so the user can rejoin with an invite.",
+      description:
+        "Lift a ban so the user can rejoin with an invite. The first call " +
+        "changes nothing and returns a preview (who it is and why they were " +
+        "banned) and a confirm_token; repeating the call with the token " +
+        "lifts the ban.",
       inputSchema: {
         user_id: z.string().describe("The banned user's ID."),
         guild: guildParam,
         reason: z.string().max(400).optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ user_id, guild, reason }) => {
+    guarded(async ({ user_id, guild, reason, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       if (!SNOWFLAKE.test(user_id.trim())) {
         return fail(
           "unban_member needs a user ID. Find it with list_bans."
         );
       }
+      // Lifting a ban lets back in someone who was put out on purpose, so
+      // it waits for the user, like the ban did.
+      let ban: { user?: { username?: string; global_name?: string | null }; reason?: string | null };
+      try {
+        ban = (await rest.get(Routes.guildBan(guildId, user_id.trim()))) as typeof ban;
+      } catch (err) {
+        if (err && typeof err === "object" && "status" in err && err.status === 404) {
+          return fail(`User ${user_id} is not banned from this server.`);
+        }
+        throw err;
+      }
+      const name = ban.user?.global_name ?? ban.user?.username ?? user_id.trim();
+      const gate = gateDestructive({
+        tool: "unban_member",
+        args: { user: user_id.trim() },
+        confirmToken: confirm_token,
+        previewSummary:
+          `Would lift the ban on ${quoted(name)} (${user_id.trim()}), ` +
+          (ban.reason ? `banned with the reason ${quoted(ban.reason, 200)}. ` : "banned with no reason given. ") +
+          "They could rejoin with any invite.",
+        previewDetails: { user: { id: user_id.trim(), name }, ban_reason: ban.reason ?? null },
+      });
+      if (gate) return gate;
       try {
         await rest.delete(Routes.guildBan(guildId, user_id.trim()), {
-          reason: reason ?? "Unbanned via Omnicord",
+          reason: reason ?? "Unbanned via discord-mcp",
         });
       } catch (err) {
         if (err && typeof err === "object" && "status" in err && err.status === 404) {
@@ -429,7 +520,7 @@ export function registerModerationTools(
         reason: z.string().max(400).optional(),
         delete_message_seconds: z.number().int().min(0).max(604800).optional(),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -461,15 +552,20 @@ export function registerModerationTools(
       );
 
       const ids = [...new Set(user_ids.map((u) => u.trim()))];
+      const wipe = delete_message_seconds ?? 0;
       const gate = gateDestructive({
         tool: "bulk_ban",
-        args: { user_ids: ids },
+        // What gets deleted along with the ban is part of the action.
+        args: { user_ids: [...ids].sort(), delete_message_seconds: wipe },
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would ban ${ids.length} user(s) at once. Hierarchy still ` +
-          "applies per user; protected users are reported as failed.",
-        previewDetails: { count: ids.length, first_ids: ids.slice(0, 10) },
+          `Would ban ${ids.length} user(s) at once` +
+          (wipe > 0
+            ? `, and delete everything they posted in the last ${wipe >= 3600 ? `${Math.round(wipe / 3600)} hour(s)` : `${wipe} second(s)`}`
+            : ", keeping their messages") +
+          ". Hierarchy still applies per user; protected users are reported as failed.",
+        previewDetails: { count: ids.length, first_ids: ids.slice(0, 10), delete_message_seconds: wipe },
       });
       if (gate) return gate;
 
@@ -478,7 +574,7 @@ export function registerModerationTools(
           user_ids: ids,
           ...(delete_message_seconds ? { delete_message_seconds } : {}),
         },
-        reason: reason ?? "Bulk ban via Omnicord",
+        reason: reason ?? "Bulk ban via discord-mcp",
       })) as RESTPostAPIGuildBulkBanResult;
 
       return ok(
@@ -556,7 +652,10 @@ export function registerModerationTools(
         "what, to what, when, and why. Use this to investigate what already " +
         "happened; for activity as it happens use subscribe_events. Filter " +
         "by action name (like channel_create, member_ban_add, " +
-        "message_delete) or by the acting user.",
+        "message_delete) or by the acting user. Discord merges some actions " +
+        "repeated in quick succession (message deletes, member moves and " +
+        "disconnects, channel and role reordering) into one entry that keeps " +
+        "only the first reason.",
       inputSchema: {
         guild: guildParam,
         action: z.string().optional()
@@ -584,8 +683,16 @@ export function registerModerationTools(
         query.set("action_type", String(code));
       }
       if (user) {
-        const member = await resolveMember(rest, guildId, user);
-        if (member.user) query.set("user_id", member.user.id);
+        // An id needs no lookup, and must not get one: someone who has left
+        // or was banned still has entries, and looking them up as a member
+        // failed before the log was ever asked.
+        const id = user.trim().match(/^(?:<@!?)?(\d{17,20})>?$/)?.[1];
+        if (id) {
+          query.set("user_id", id);
+        } else {
+          const member = await resolveMember(rest, guildId, user);
+          if (member.user) query.set("user_id", member.user.id);
+        }
       }
 
       const log = (await rest.get(Routes.guildAuditLog(guildId), {
@@ -622,7 +729,9 @@ export function registerModerationTools(
         "for up to 24 hours, to lock the server down during a raid. Give a " +
         "number of hours to pause, 0 to lift a pause, or omit a field to leave " +
         "it unchanged. Called with neither field, it reports the current " +
-        "state, including any raid or DM spam Discord detected on its own.",
+        "state, including any raid or DM spam Discord detected on its own. " +
+        "Pausing, or pausing for longer, happens at once. Lifting a pause " +
+        `that is running, or ending it sooner, needs confirming: ${CONFIRM_STEPS}.`,
       inputSchema: {
         guild: guildParam,
         invites: z.number().min(0).max(24).optional()
@@ -635,10 +744,11 @@ export function registerModerationTools(
             "Hours to pause DMs between non-friend members, up to 24. Use 0 " +
               "to resume, or omit to leave them unchanged."
           ),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ guild, invites, dms }) => {
+    guarded(async ({ guild, invites, dms, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
 
       const guildData = (await rest.get(Routes.guild(guildId))) as APIGuild;
@@ -699,6 +809,44 @@ export function registerModerationTools(
         invites_disabled_until: resolve(invites, current.invites_disabled_until),
         dms_disabled_until: resolve(dms, current.dms_disabled_until),
       };
+
+      // A pause is put up in a hurry and taken down at leisure. Putting one
+      // up, or keeping it up for longer, happens at once; one that would end
+      // sooner than it does now waits for the user. The token is bound to
+      // the hours asked for, not to the times they work out to, which move
+      // with the clock between the preview and the confirmation.
+      const sooner = (next: string | null, now: string | null | undefined): boolean =>
+        active(now) && (next === null || new Date(next).getTime() < new Date(now as string).getTime());
+      const lifted: string[] = [];
+      for (const [next, now, what] of [
+        [body.invites_disabled_until, current.invites_disabled_until, "new invites"],
+        [body.dms_disabled_until, current.dms_disabled_until, "DMs between members who are not friends"],
+      ] as const) {
+        if (!sooner(next, now)) continue;
+        // Discord writes its times with an offset; previews use one form.
+        const runsUntil = new Date(now as string).toISOString();
+        lifted.push(
+          next === null
+            ? `lift the pause on ${what}, which runs until ${runsUntil}`
+            : `end the pause on ${what} at ${next} instead of ${runsUntil}`
+        );
+      }
+      if (lifted.length > 0) {
+        const flagged = [
+          current.raid_detected_at ? `a raid at ${current.raid_detected_at}` : "",
+          current.dm_spam_detected_at ? `DM spam at ${current.dm_spam_detected_at}` : "",
+        ].filter(Boolean);
+        const gate = gateDestructive({
+          tool: "set_incident_actions",
+          args: { invites: invites ?? null, dms: dms ?? null },
+          confirmToken: confirm_token,
+          previewSummary:
+            `Would ${lifted.join(", and ")}.` +
+            (flagged.length ? ` Discord flagged ${flagged.join(" and ")}.` : ""),
+          previewDetails: { incidents: digest(current) },
+        });
+        if (gate) return gate;
+      }
 
       const result = (await rest.put(Routes.guildIncidentActions(guildId), {
         body,

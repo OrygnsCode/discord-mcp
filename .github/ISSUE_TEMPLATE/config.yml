@@ -1,13 +1,13 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security disclosure
-    url: https://github.com/OrygnsCode/Omnicord/security/advisories/new
+    url: https://github.com/OrygnsCode/discord-mcp/security/advisories/new
     about: Report a vulnerability privately. Do not open a public issue for security problems.
   - name: Setup and troubleshooting
-    url: https://github.com/OrygnsCode/Omnicord/blob/main/docs/troubleshooting.md
+    url: https://github.com/OrygnsCode/discord-mcp/blob/main/docs/troubleshooting.md
     about: Most first-run problems (intents, permissions, the bot not appearing) are covered here. Try run_setup_check first.
   - name: Tool catalog
-    url: https://github.com/OrygnsCode/Omnicord/blob/main/docs/tool-catalog.md
+    url: https://github.com/OrygnsCode/discord-mcp/blob/main/docs/tool-catalog.md
     about: The full contract for every tool. Check here before requesting a capability.
   - name: Discord API
     url: https://discord.com/developers/docs/intro

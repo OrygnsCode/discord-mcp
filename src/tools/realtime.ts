@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
+import { quoted } from "../discord/names.js";
 import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import {
   eventBus,
   SUBSCRIBABLE_TYPES,
 } from "../discord/gatewayEvents.js";
-import { getGatewayState, getPortalIntents } from "../discord/gateway.js";
+import { getGatewayState, getPortalIntents, isGatewayBot } from "../discord/gateway.js";
 import { ok, fail } from "../envelope.js";
 import { enter, guarded, guildParam, resolveChannel } from "./common.js";
 
@@ -26,7 +27,7 @@ function requireGateway(): string | null {
   if (state.status === "off") {
     return (
       `The gateway is off (${state.reason}), so no events are flowing. ` +
-      "Events need a DISCORD_TOKEN and OMNICORD_GATEWAY not set to off."
+      "Events need a DISCORD_TOKEN and DISCORD_MCP_GATEWAY not set to off."
     );
   }
   return `The gateway is in an error state: ${state.message}`;
@@ -34,17 +35,19 @@ function requireGateway(): string | null {
 
 export function registerRealtimeTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "subscribe_events",
     {
       title: "Subscribe to events",
       description:
-        "Watch the server live: start recording real-time activity as it " +
+        "Watch one server live: start recording real-time activity as it " +
         "happens (messages, joins and leaves, reactions, channel and role " +
         "changes, bans, voice movement) into a buffer you then read with " +
-        "get_recent_events. Use this to observe what is going on now. It is " +
+        "get_recent_events. Only the named server's events are recorded " +
+        "(the default server when none is named). Use this to observe what " +
+        "is going on now. It is " +
         "not for scheduled community events (create_event) or timed " +
         "messages (schedule_message). Available types: " +
         TYPE_NAMES.join(", ") +
@@ -71,10 +74,22 @@ export function registerRealtimeTools(
         );
       }
 
+      // A subscription records one server. The connection hears every
+      // server its bot is in, so one made without this would fill with the
+      // other servers' messages too.
+      // Events arrive over the default bot's connection, so a server it
+      // shares with another bot is entered as the default bot here,
+      // whichever of them handles the server otherwise.
+      const { rest, guildId, guildName, bot } = await enter(config, guild, undefined, { shared: "listening" });
+      if (!isGatewayBot(rest)) {
+        return fail(
+          `Live events arrive over the default bot's connection to Discord, and ${quoted(guildName)} is reached ` +
+            `through the bot ${quoted(bot.name)}, so nothing from it would arrive. Only servers the default bot is in can be watched.`
+        );
+      }
       let channelId: string | null = null;
       let channelName: string | undefined;
       if (channel) {
-        const { rest, guildId } = await enter(config, guild);
         const target = await resolveChannel(rest, guildId, channel);
         channelId = target.id;
         channelName = target.name ?? undefined;
@@ -92,7 +107,7 @@ export function registerRealtimeTools(
             warnings.push(
               `${type} needs the ${needs} intent, which is off in the ` +
                 "Developer Portal; those events will not arrive until it " +
-                "is enabled and Omnicord restarts."
+                "is enabled and this server restarts."
             );
           }
         }
@@ -101,18 +116,20 @@ export function registerRealtimeTools(
       const sub = eventBus.subscribe({
         id: randomBytes(8).toString("hex"),
         types,
+        guildId,
         channelId,
         includeBots: include_bots ?? false,
       });
 
       return ok(
-        `Subscribed to ${types.join(", ")}` +
-          (channelName ? ` in #${channelName}` : "") +
+        `Subscribed to ${types.join(", ")} in ${quoted(guildName)}` +
+          (channelName ? `, #${channelName} only` : "") +
           `. Events buffer under subscription ${sub.id}; read them with ` +
           "get_recent_events.",
         {
           subscription_id: sub.id,
           types,
+          guild_id: guildId,
           channel_id: channelId,
           include_bots: sub.includeBots,
         },
@@ -168,6 +185,7 @@ export function registerRealtimeTools(
         subscriptions: subs.map((s) => ({
           id: s.id,
           types: [...s.types],
+          guild_id: s.guildId,
           channel_id: s.channelId,
           include_bots: s.includeBots,
           buffered: s.buffer.length,

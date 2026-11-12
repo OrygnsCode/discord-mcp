@@ -14,17 +14,17 @@ import type {
 //
 // Discord's component system covers layout (text, sections, galleries,
 // separators, containers) and interactivity (custom_id buttons, select
-// menus). Omnicord ships the layout half plus link buttons, and nothing
+// menus). This server ships the layout half plus link buttons, and nothing
 // that fires an interaction. That is a deliberate line, not a gap: an
 // interaction has to be answered on the gateway within three seconds by a
-// process that is listening for it, and Omnicord answers MCP calls, not
+// process that is listening for it, and this server answers MCP calls, not
 // Discord interactions. A custom_id button posted from here would render
 // correctly and then fail for every person who clicked it. A link button
 // carries a URL and never calls back, so it works with nothing listening.
 //
-// File components are left out for a different reason: they accept only
-// attachment:// references, and there is no upload path here to produce
-// one. Galleries and thumbnails take ordinary URLs, so they stay.
+// File components are left out. Galleries and thumbnails take ordinary
+// URLs, or attachment://<filename> for a file sent with the same message
+// (send_message's files), and cover what a layout needs to show.
 //
 // The message flag is one way. Once a message carries it, content and
 // embeds stop rendering on that message for good, so the callers refuse to
@@ -40,7 +40,9 @@ export const MAX_TOTAL_COMPONENTS = 40;
 const MAX_IN_CONTAINER = 10;
 
 const mediaSchema = z.object({
-  url: z.string().url().describe("Public image URL."),
+  url: z.string().url().describe(
+    "Public image URL, or attachment://<filename> for a file sent with the message."
+  ),
   description: z.string().max(1024).optional().describe("Alt text."),
   spoiler: z.boolean().optional().describe("Blur until clicked."),
 });

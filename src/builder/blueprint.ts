@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // The blueprint is the contract between the AI client and the builder.
 // The client AI translates a conversation ("I want a dark fantasy guild
-// with mod channels and an LFG role") into this structure; Omnicord
+// with mod channels and an LFG role") into this structure; this server
 // validates it, plans it, and executes it. The blueprint deliberately
 // references roles by name rather than ID so it stays portable across
 // servers and across time.
@@ -11,7 +11,40 @@ const hexColor = z
   .string()
   .regex(/^#?[0-9a-fA-F]{6}$/, "Use a hex color like #5865f2");
 
+// Exports carry each item's Discord id. With an id, a blueprint item means
+// that exact role or channel, so a different name renames it. Without one,
+// items match by name.
+const snowflake = z
+  .string()
+  .regex(/^\d{17,20}$/, "A Discord id: 17 to 20 digits")
+  .optional()
+  .describe("Discord id from export_server_blueprint. Matches this exact item, so a new name renames it.");
+
+const privateTo = z.array(z.string()).nullable().optional();
+
+// Everything about a role's access in one channel that private_to,
+// read_only, and posting_roles do not cover.
+const rolePermissions = z
+  .array(
+    z.object({
+      role: z.string().min(1).max(100).describe("Role name, or @everyone."),
+      allow: z.array(z.string()).optional(),
+      deny: z.array(z.string()).optional(),
+    })
+  )
+  .max(50)
+  .optional()
+  .describe(
+    "Extra permissions per role here, beyond who can see and post " +
+      '(private_to, read_only, posting_roles). Example: [{"role": "Event ' +
+      'Staff", "allow": ["mention_everyone", "embed_links"]}]. A listed ' +
+      "role's extras become exactly these; roles not listed keep theirs."
+  );
+
+export type BlueprintRolePermission = { role: string; allow?: string[]; deny?: string[] };
+
 export const blueprintRoleSchema = z.object({
+  id: snowflake,
   name: z.string().min(1).max(100),
   preset: z
     .enum(["none", "member", "moderator", "admin"])
@@ -21,13 +54,14 @@ export const blueprintRoleSchema = z.object({
     .array(z.string())
     .optional()
     .describe("Extra permission names beyond the preset."),
-  color: hexColor.optional(),
+  color: hexColor.nullable().optional().describe("null clears it."),
   hoist: z.boolean().optional()
     .describe("Show members with this role separately in the sidebar."),
   mentionable: z.boolean().optional(),
 });
 
 export const blueprintChannelSchema = z.object({
+  id: snowflake,
   name: z.string().min(1).max(100),
   type: z
     .enum(["text", "voice", "forum", "stage", "announcement"])
@@ -36,26 +70,28 @@ export const blueprintChannelSchema = z.object({
   topic: z.string().max(1024).optional(),
   slowmode_seconds: z.number().int().min(0).max(21600).optional(),
   nsfw: z.boolean().optional(),
-  private_to: z
-    .array(z.string())
-    .optional()
-    .describe(
-      "Role names that can see this channel. Everyone else is denied view."
-    ),
+  private_to: privateTo.describe(
+    "Role names that can see this channel; everyone else is denied view. " +
+      "[] leaves only admins. null makes it visible to everyone. Omit to " +
+      "follow the category."
+  ),
   read_only: z.boolean().optional()
     .describe("Deny sending for everyone; for rules and announcements."),
   posting_roles: z
     .array(z.string())
     .optional()
-    .describe("With read_only: role names that may still post."),
+    .describe("With read_only: role names that may still post and start threads."),
+  permissions: rolePermissions,
 });
 
 export const blueprintCategorySchema = z.object({
+  id: snowflake,
   name: z.string().min(1).max(100),
-  private_to: z
-    .array(z.string())
-    .optional()
-    .describe("Role names that can see the whole category."),
+  private_to: privateTo.describe(
+    "Role names that can see the whole category. [] leaves only admins. " +
+      "null makes it visible to everyone."
+  ),
+  permissions: rolePermissions,
   channels: z.array(blueprintChannelSchema).max(50),
 });
 

@@ -1,12 +1,13 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type {
   APIGuildChannel,
   APIGuildMember,
   APIRole,
 } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import {
   getRoles,
   getChannels,
@@ -20,7 +21,26 @@ import {
   highestRolePosition,
 } from "../discord/preflight.js";
 import { resolveOne } from "../discord/resolve.js";
+import { describeRateLimit } from "../discord/client.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import {
+  channelLabel,
+  describeHierarchyPowers,
+  grantLines,
+  grantPhrase,
+  grantsForGivingRoles,
+  grantsForTakingRole,
+  hasGrants,
+  type HierarchyFlip,
+  hierarchyFlips,
+  joinWords,
+  noGrants,
+  simulateRoleOrder,
+} from "../discord/grants.js";
+import { loadScene } from "./grantGate.js";
+import type { RecordEntry } from "../builder/records.js";
+import { changeData, recordChange, undoNote } from "./changes.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -29,6 +49,7 @@ import {
   resolveChannel,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // Structural conveniences: cloning channels and roles, reordering, single
@@ -36,9 +57,25 @@ import {
 
 const P = PermissionFlagsBits;
 
+// One line per role that rises: who it passes, and what its holders could
+// then do to the people whose highest role is one of those.
+function flipLines(flips: HierarchyFlip[]): string[] {
+  const byRisen = new Map<string, HierarchyFlip[]>();
+  for (const f of flips) byRisen.set(f.risen.id, [...(byRisen.get(f.risen.id) ?? []), f]);
+  return [...byRisen.values()].map((group) => {
+    const risen = group[0].risen;
+    const over = group.map((f) => quoted(String(f.over.name ?? f.over.id)));
+    return (
+      `${quoted(risen.name)} moves above ${joinWords(over)}, so people with ${quoted(risen.name)} could ` +
+      `${describeHierarchyPowers(group[0].powers)} people whose highest role is ` +
+      `${over.length === 1 ? over[0] : "one of those"}.`
+    );
+  });
+}
+
 export function registerStructureTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "get_channel",
@@ -61,8 +98,8 @@ export function registerStructureTools(
         ? channels.find((c) => c.id === ch.parent_id)
         : undefined;
       return ok(
-        `${ch.name}: ${CHANNEL_TYPE_LABELS[ch.type] ?? `type ${ch.type}`}` +
-          (parent ? ` in ${parent.name}` : "") +
+        `${channelLabel(ch)}: ${CHANNEL_TYPE_LABELS[ch.type] ?? `type ${ch.type}`}` +
+          (parent ? ` in ${quoted(parent.name)}` : "") +
           ".",
         {
           id: ch.id,
@@ -122,12 +159,16 @@ export function registerStructureTools(
             ? { permission_overwrites: src.permission_overwrites }
             : {}),
         },
-        reason: "Cloned via Omnicord",
+        reason: "Cloned via discord-mcp",
       })) as APIGuildChannel;
       invalidateGuildCaches(guildId);
-      return ok(`Cloned ${src.name} into ${created.name}.`, {
+      const recorded = await recordChange(rest, guildId, "clone_channel", [
+        { op: "created", kind: created.type === 4 ? "category" : "channel", id: created.id, name: created.name ?? "", channelType: created.type },
+      ]);
+      return ok(`Cloned ${quoted(src.name)} into ${quoted(created.name)}.` + undoNote(recorded), {
         id: created.id,
         name: created.name,
+        ...changeData(recorded),
       });
     })
   );
@@ -171,12 +212,16 @@ export function registerStructureTools(
           hoist: src.hoist,
           mentionable: src.mentionable,
         },
-        reason: "Cloned via Omnicord",
+        reason: "Cloned via discord-mcp",
       })) as APIRole;
       invalidateGuildCaches(guildId);
-      return ok(`Cloned role ${src.name} into ${created.name}.`, {
+      const recorded = await recordChange(rest, guildId, "clone_role", [
+        { op: "created", kind: "role", id: created.id, name: created.name },
+      ]);
+      return ok(`Cloned role ${quoted(src.name)} into ${quoted(created.name)}.` + undoNote(recorded), {
         id: created.id,
         name: created.name,
+        ...changeData(recorded),
       });
     })
   );
@@ -222,7 +267,7 @@ export function registerStructureTools(
       }
       await rest.patch(Routes.guildChannels(guildId), {
         body,
-        reason: "Reordered via Omnicord",
+        reason: "Reordered via discord-mcp",
       });
       invalidateGuildCaches(guildId);
       return ok(`Reordered ${moves.length} channel(s).`, { moved: moves.length });
@@ -235,7 +280,12 @@ export function registerStructureTools(
       title: "Reorder roles",
       description:
         "Move roles to new hierarchy positions in one call. Higher " +
-        "positions sit higher in the list and outrank lower ones.",
+        "positions sit higher in the list and outrank lower ones. Moving a " +
+        "role that can ban, kick, time out, rename, or change roles above a " +
+        "role it was below lets its holders do that to the people with the " +
+        "other role, so that needs confirming: the first call changes " +
+        "nothing and returns a preview and a confirm_token, and repeating " +
+        "the call with the token makes the change.",
       inputSchema: {
         guild: guildParam,
         moves: z
@@ -246,10 +296,11 @@ export function registerStructureTools(
             })
           )
           .min(1),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ guild, moves }) => {
+    guarded(async ({ guild, moves, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const roles = await getRoles(rest, guildId);
       const perms = await botPermissions(rest, guildId);
@@ -266,12 +317,53 @@ export function registerStructureTools(
         }
         body.push({ id: resolution.match.id, position: move.position });
       }
+
+      // A role with powers Discord limits by role order, moving above a role
+      // it was below, lets its holders use them on the people with that role.
+      const orderBefore = simulateRoleOrder(roles, guildId, []);
+      const flips = hierarchyFlips(roles, guildId, orderBefore, simulateRoleOrder(roles, guildId, body));
+      const flipKey = (list: HierarchyFlip[]) => list.map((f) => `${f.risen.id}>${f.over.id}`).sort();
+      if (flips.length > 0) {
+        const lines = flipLines(flips);
+        const gate = gateDestructive({
+          tool: "reorder_roles",
+          args: {
+            moves: [...body].sort((a, b) => a.id.localeCompare(b.id)),
+            flips: flipKey(flips),
+          },
+          confirmToken: confirm_token,
+          previewSummary:
+            lines.length === 1
+              ? `Would reorder the roles: ${lines[0]}`
+              : `Would reorder the roles so that ${lines.length} roles with moderator powers rise above roles they are below now.`,
+          dialogLines: lines.length === 1 ? [] : lines,
+          previewDetails: { moves: body, flips: lines },
+        });
+        if (gate) return gate;
+      }
+
       await rest.patch(Routes.guildRoles(guildId), {
         body,
-        reason: "Reordered via Omnicord",
+        reason: "Reordered via discord-mcp",
       });
       invalidateGuildCaches(guildId);
-      return ok(`Reordered ${moves.length} role(s).`, { moved: moves.length });
+
+      // Said if Discord placed the roles differently than predicted and a
+      // role with such powers passed one it was not shown passing.
+      const warnings: string[] = [];
+      try {
+        const now = (await rest.get(Routes.guildRoles(guildId))) as APIRole[];
+        const seen = new Set(flipKey(flips));
+        const unseen = hierarchyFlips(roles, guildId, orderBefore, simulateRoleOrder(now, guildId, [])).filter(
+          (f) => !seen.has(`${f.risen.id}>${f.over.id}`)
+        );
+        if (unseen.length) {
+          warnings.push(`Discord placed the roles differently than expected: ${flipLines(unseen).join(" ")}`);
+        }
+      } catch {
+        // The check is a courtesy; the reorder itself went through.
+      }
+      return ok(`Reordered ${moves.length} role(s).`, { moved: moves.length }, warnings);
     })
   );
 
@@ -294,13 +386,13 @@ export function registerStructureTools(
       const src = await resolveChannel(rest, guildId, source, [5]);
       const dest = await resolveChannel(rest, guildId, target, [0, 5]);
       const perms = await botPermissions(rest, guildId, dest);
-      requirePermissions(perms, [[P.ManageWebhooks, "Manage Webhooks"]], `in #${dest.name}`);
+      requirePermissions(perms, [[P.ManageWebhooks, "Manage Webhooks"]], `in ${channelLabel(dest)}`);
 
       await rest.post(Routes.channelFollowers(src.id), {
         body: { webhook_channel_id: dest.id },
-        reason: "Followed via Omnicord",
+        reason: "Followed via discord-mcp",
       });
-      return ok(`#${dest.name} now follows announcements from #${src.name}.`, {
+      return ok(`${channelLabel(dest)} now follows announcements from ${channelLabel(src)}.`, {
         source: src.id,
         target: dest.id,
       });
@@ -329,7 +421,7 @@ export function registerStructureTools(
           })
           .optional(),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -351,10 +443,17 @@ export function registerStructureTools(
         return fail(`No single role matches "${role}".`);
       }
       const targetRole = roles.find((r) => r.id === resolution.match.id) as APIRole;
+      if (targetRole.id === guildId) {
+        return fail("@everyone is held by every member already and cannot be given or taken.");
+      }
+      if (targetRole.managed) {
+        return fail(`${quoted(targetRole.name)} belongs to an integration and cannot be given or taken by hand.`);
+      }
       const botTop = highestRolePosition(botMember.roles, roles);
-      if (targetRole.position > botTop) {
+      // Discord lets a bot hand out only roles strictly below its highest.
+      if (targetRole.position >= botTop) {
         return fail(
-          `${targetRole.name} is above the bot's highest role, so the bot ` +
+          `${quoted(targetRole.name)} is not below the bot's highest role, so the bot ` +
             "cannot manage it. Move the bot's role higher."
         );
       }
@@ -368,8 +467,15 @@ export function registerStructureTools(
         if (!("match" in hr)) return fail(`No single role matches "${filter.has_role}".`);
         hasRoleId = hr.match.id;
       }
-      const before = filter?.joined_before ? new Date(filter.joined_before).getTime() : undefined;
-      const after = filter?.joined_after ? new Date(filter.joined_after).getTime() : undefined;
+      // A date that does not parse must stop here: compared against NaN,
+      // every member would pass the filter.
+      const before = filter?.joined_before ? Date.parse(filter.joined_before) : undefined;
+      const after = filter?.joined_after ? Date.parse(filter.joined_after) : undefined;
+      for (const [name, value] of [["joined_before", before], ["joined_after", after]] as const) {
+        if (value !== undefined && Number.isNaN(value)) {
+          return fail(`${name} is not a date. Use ISO 8601, like 2026-11-01 or 2026-11-01T18:00:00Z.`);
+        }
+      }
 
       // Walk members up to the cap, applying filters.
       const matched: APIGuildMember[] = [];
@@ -402,48 +508,101 @@ export function registerStructureTools(
         ? ["Stopped after scanning 3000 members; larger servers need paging."]
         : [];
 
+      // What the change hands the members it touches, judged from the
+      // roles each of them holds: a role given can carry powers or open
+      // channels, and a role taken away can lift a denial. Said in the
+      // preview so it is not approved as a number of members alone.
+      let grants = noGrants();
+      if (matched.length > 0) {
+        const scene = await loadScene(rest, guildId);
+        const held = matched.map((m) => m.roles);
+        grants =
+          action === "assign"
+            ? grantsForGivingRoles(scene, [targetRole.id], held)
+            : grantsForTakingRole(scene, targetRole.id, held);
+      }
       const gate = gateDestructive({
         tool: "bulk_update_roles",
-        args: { guild: guildId, action, role: targetRole.id, count: matched.length },
+        // Bound to the members themselves, not their number: a different
+        // filter that happens to match as many people is a different action.
+        args: {
+          guild: guildId,
+          action,
+          role: targetRole.id,
+          members: createHash("sha256").update(matched.map((m) => m.user?.id ?? "").sort().join(",")).digest("hex"),
+        },
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would ${action} the role ${targetRole.name} ` +
-          `${action === "assign" ? "to" : "from"} ${matched.length} member(s).`,
+          `Would ${action} the role ${quoted(targetRole.name)} ` +
+          `${action === "assign" ? "to" : "from"} ${matched.length} member(s).` +
+          (hasGrants(grants)
+            ? action === "assign"
+              ? ` The role lets them ${grantPhrase(grants)}.`
+              : ` Without it they can ${grantPhrase(grants)}.`
+            : ""),
+        ...(hasGrants(grants) ? { dialogLines: grantLines(grants) } : {}),
         previewDetails: {
           action,
           role: targetRole.name,
           count: matched.length,
           sample: matched.slice(0, 10).map((m) => m.user?.username),
+          ...(hasGrants(grants) ? { grants: grantLines(grants) } : {}),
         },
       });
       if (gate) return gate;
 
       let done = 0;
+      let failedCount = 0;
+      let firstFailure: string | undefined;
+      // Only members whose roles actually changed are recorded, so undo never
+      // takes a role from someone who already had it.
+      const changedMembers: RecordEntry[] = [];
       for (const m of matched) {
         if (!m.user) continue;
+        const had = m.roles.includes(targetRole.id);
         try {
           if (action === "assign") {
             await rest.put(Routes.guildMemberRole(guildId, m.user.id, targetRole.id), {
-              reason: "Bulk role via Omnicord",
+              reason: "Bulk role via discord-mcp",
             });
           } else {
             await rest.delete(Routes.guildMemberRole(guildId, m.user.id, targetRole.id), {
-              reason: "Bulk role via Omnicord",
+              reason: "Bulk role via discord-mcp",
             });
           }
           done += 1;
-        } catch {
-          // Skip individuals that fail (left the server mid-run, etc.).
+          if ((action === "assign") !== had) {
+            changedMembers.push({
+              op: "member_role",
+              change: action === "assign" ? "added" : "removed",
+              member: m.user.id,
+              memberName: m.nick ?? m.user.global_name ?? m.user.username,
+              role: targetRole.id,
+              name: targetRole.name,
+            });
+          }
+        } catch (err) {
+          // One member failing (they left mid-run, say) must not stop the
+          // rest, but it is counted and said, never passed off as done. A
+          // rate limit that will not clear soon stops the run.
+          const limited = describeRateLimit(err);
+          failedCount += 1;
+          firstFailure ??= limited ?? (err instanceof Error ? err.message : String(err));
+          if (limited) break;
         }
       }
 
-      return ok(
-        `${action === "assign" ? "Assigned" : "Removed"} ${targetRole.name} ` +
-          `${action === "assign" ? "to" : "from"} ${done} member(s).`,
-        { action, role: targetRole.name, affected: done },
-        warnings
-      );
+      const recorded = await recordChange(rest, guildId, "bulk_update_roles", changedMembers);
+      const notDone = matched.length - done;
+      const summary =
+        `${action === "assign" ? "Assigned" : "Removed"} ${quoted(targetRole.name)} ` +
+        `${action === "assign" ? "to" : "from"} ${done} of ${matched.length} member(s).` +
+        (notDone > 0 ? ` ${notDone} were not changed; the first error was: ${firstFailure}` : "") +
+        undoNote(recorded);
+      const data = { action, role: targetRole.name, affected: done, failed: notDone, ...changeData(recorded) };
+      const notes = [...warnings, ...(recorded.warning ? [recorded.warning] : [])];
+      return done === 0 && failedCount > 0 ? fail(summary, data) : ok(summary, data, notes);
     })
   );
 }

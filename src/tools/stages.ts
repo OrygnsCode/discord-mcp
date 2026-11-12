@@ -1,11 +1,14 @@
 import { z } from "zod";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIStageInstance } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { getChannels } from "../discord/guildData.js";
 import { ok, fail } from "../envelope.js";
+import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
 import {
+  confirmTokenParam,
   enter,
   guarded,
   guildParam,
@@ -20,7 +23,7 @@ const P = PermissionFlagsBits;
 
 export function registerStageTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "list_stages",
@@ -70,7 +73,7 @@ export function registerStageTools(
       const { rest, guildId } = await enter(config, guild);
       const ch = await resolveChannel(rest, guildId, channel, [13]);
       const perms = await botPermissions(rest, guildId, ch);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${ch.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${quoted(ch.name)}`);
 
       const instance = (await rest.post(Routes.stageInstances(), {
         body: {
@@ -79,9 +82,9 @@ export function registerStageTools(
           privacy_level: 2,
           send_start_notification: notify ?? false,
         },
-        reason: "Stage started via Omnicord",
+        reason: "Stage started via discord-mcp",
       })) as APIStageInstance;
-      return ok(`Started a stage on ${ch.name}: "${instance.topic}".`, {
+      return ok(`Started a stage on ${quoted(ch.name)}: ${quoted(instance.topic, 120)}.`, {
         channel: { id: ch.id, name: ch.name },
         topic: instance.topic,
       });
@@ -104,13 +107,13 @@ export function registerStageTools(
       const { rest, guildId } = await enter(config, guild);
       const ch = await resolveChannel(rest, guildId, channel, [13]);
       const perms = await botPermissions(rest, guildId, ch);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${ch.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${quoted(ch.name)}`);
 
       const instance = (await rest.patch(Routes.stageInstance(ch.id), {
         body: { topic },
-        reason: "Stage updated via Omnicord",
+        reason: "Stage updated via discord-mcp",
       })) as APIStageInstance;
-      return ok(`Updated the stage topic on ${ch.name}.`, {
+      return ok(`Updated the stage topic on ${quoted(ch.name)}.`, {
         topic: instance.topic,
       });
     })
@@ -120,30 +123,54 @@ export function registerStageTools(
     "end_stage",
     {
       title: "End stage",
-      description: "End the live stage on a stage channel.",
+      description:
+        "End the live stage on a stage channel. It ends for everyone " +
+        "listening, so the first call returns a preview and a " +
+        "confirm_token; repeating the call with the token ends it.",
       inputSchema: {
         channel: z.string().describe("Stage channel name or ID."),
         guild: guildParam,
+        dry_run: z.boolean().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    guarded(async ({ channel, guild }) => {
+    guarded(async ({ channel, guild, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const ch = await resolveChannel(rest, guildId, channel, [13]);
       const perms = await botPermissions(rest, guildId, ch);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${ch.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `on ${quoted(ch.name)}`);
 
+      let topic: string | undefined;
       try {
-        await rest.delete(Routes.stageInstance(ch.id), {
-          reason: "Stage ended via Omnicord",
-        });
+        topic = ((await rest.get(Routes.stageInstance(ch.id))) as APIStageInstance).topic;
       } catch (err) {
         if ((err as { status?: number }).status === 404) {
-          return fail(`There is no live stage on ${ch.name}.`);
+          return fail(`There is no live stage on ${quoted(ch.name)}.`);
         }
         throw err;
       }
-      return ok(`Ended the stage on ${ch.name}.`, { ended: true });
+      const gate = gateDestructive({
+        tool: "end_stage",
+        args: { channel: ch.id },
+        dryRun: dry_run,
+        confirmToken: confirm_token,
+        previewSummary: `Would end the live stage ${quoted(topic, 120)} on ${quoted(ch.name)}, for everyone listening.`,
+        previewDetails: { channel: { id: ch.id, name: ch.name }, topic },
+      });
+      if (gate) return gate;
+
+      try {
+        await rest.delete(Routes.stageInstance(ch.id), {
+          reason: "Stage ended via discord-mcp",
+        });
+      } catch (err) {
+        if ((err as { status?: number }).status === 404) {
+          return fail(`There is no live stage on ${quoted(ch.name)}.`);
+        }
+        throw err;
+      }
+      return ok(`Ended the stage on ${quoted(ch.name)}.`, { ended: true });
     })
   );
 }

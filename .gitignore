@@ -9,5 +9,6 @@ bots.json
 .DS_Store
 .demo-build.json
 .omnicord/
+.discord-mcp/
 omnicord-video-script.md
 *.tgz

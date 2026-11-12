@@ -1,11 +1,11 @@
 # Contributing
 
-Thanks for your interest in Omnicord. This document covers how the project is
+Thanks for your interest in discord-mcp. This document covers how the project is
 laid out, the workflow we expect for changes, and the conventions that keep the
 codebase consistent.
 
 If you only want to report a bug or request a feature, the
-[issue templates](https://github.com/OrygnsCode/Omnicord/issues/new/choose) are
+[issue templates](https://github.com/OrygnsCode/discord-mcp/issues/new/choose) are
 the fastest path. For security problems, follow [SECURITY.md](./SECURITY.md)
 instead of opening a public issue.
 
@@ -16,11 +16,7 @@ participating, you agree to uphold it.
 
 ## Licensing and sign-off
 
-Omnicord is source available under the [Elastic License 2.0](./LICENSE), which
-is not an OSI-approved open source license. Read it before you contribute. In
-plain terms: anyone may use, modify, and self-host the code, including inside a
-business. The one thing the license forbids is offering Omnicord to third
-parties as a hosted or managed service.
+discord-mcp is open source under the [Apache License 2.0](./LICENSE).
 
 Contributions are accepted under that same license. Instead of a CLA we use the
 [Developer Certificate of Origin](https://developercertificate.org/). Sign off
@@ -31,22 +27,22 @@ git commit -s
 ```
 
 That appends a `Signed-off-by:` trailer certifying you wrote the patch, or
-otherwise have the right to submit it under the Elastic License 2.0. Pull
+otherwise have the right to submit it under the Apache License 2.0. Pull
 requests with unsigned commits will be asked to sign off before merge.
 
 ## Prerequisites
 
-- Node.js **20** or later. CI runs Node 20, 22, and 24 on Ubuntu, plus Node 24
-  on macOS and Windows.
-- A recent `npm` (ships with Node 20+).
+- Node.js **22** or later. CI runs Node 22 and 24 on Ubuntu, plus Node 24 on
+  macOS and Windows.
+- A recent `npm` (ships with Node 22+).
 - For the live acceptance suite only: a Discord bot token and a **disposable**
   test server. Read the warning in [Testing](#testing) first.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/OrygnsCode/Omnicord.git
-cd Omnicord
+git clone https://github.com/OrygnsCode/discord-mcp.git
+cd discord-mcp
 npm install
 npm run build
 ```
@@ -57,7 +53,7 @@ To iterate locally:
 npm run dev
 ```
 
-`tsx` runs the server straight from source. Omnicord speaks MCP over stdio, so
+`tsx` runs the server straight from source. discord-mcp speaks MCP over stdio, so
 the easiest way to drive it during development is to point a real client at the
 build. See [docs/clients.md](./docs/clients.md) for per-client configuration.
 
@@ -67,13 +63,16 @@ build. See [docs/clients.md](./docs/clients.md) for per-client configuration.
 src/
   index.ts            # Entry point: stdio, --http, and the init wizard
   server.ts           # Builds the McpServer and registers every tool group
+  identity.ts         # Server name, package name, and command
   config.ts           # Environment, .env, and bots.json loading; VERSION
-  home.ts             # Config and data locations (OMNICORD_HOME)
+  settings.ts         # DISCORD_MCP_* settings, with the pre-2.0 OMNICORD_* names
+  home.ts             # Config and data locations (DISCORD_MCP_HOME), the 2.0 move
+  lifecycle.ts        # When the gateway and scheduler start
   safety.ts           # The confirmation gate (gateDestructive)
-  toolsets.ts         # Tool groups and the OMNICORD_TOOLS selection
+  toolsets.ts         # Tool groups and the DISCORD_MCP_TOOLS selection
   envelope.ts         # The ok() / fail() output envelope
   http.ts             # Streamable HTTP transport and its security gates
-  scheduler.ts        # Omnicord-side scheduled messages
+  scheduler.ts        # Scheduled messages run by this server
   wizard.ts           # The interactive setup wizard
   wizardLib.ts        # Pure wizard logic (client detection, config merge)
   discord/
@@ -96,8 +95,9 @@ src/
     write.ts moderation.ts manage.ts ...
 scripts/
   unit.mjs            # Pure logic. No network, no token.
-  smoke.mjs           # Full stdio protocol session. No token needed.
-  smoke-http.mjs      # HTTP transport, sessions, auth, security gates.
+  smoke.mjs           # Stdio session on the 2025 protocol, plus the wizard. No token.
+  smoke-modern.mjs    # Stdio session on the 2026-07-28 protocol. No token.
+  smoke-http.mjs      # HTTP transport on both protocols, auth, security gates.
   acceptance.mjs      # Live end-to-end against a real Discord server.
   smoke-docker.mjs    # Builds and verifies the container image.
 docs/                 # Getting started, clients, self-hosting, security, tools
@@ -108,15 +108,16 @@ docs/                 # Getting started, clients, self-hosting, security, tools
 The same checks CI runs:
 
 ```bash
-npm test        # build + unit + smoke + smoke-http
+npm test        # build + unit + smoke + smoke-modern + smoke-http
 ```
 
 Individually:
 
 ```bash
 node scripts/unit.mjs        # resolver, permissions, planner, the gate
-node scripts/smoke.mjs       # stdio protocol session, no token needed
-node scripts/smoke-http.mjs  # HTTP transport, auth, security gates
+node scripts/smoke.mjs         # stdio, 2025 protocol, plus the wizard; no token needed
+node scripts/smoke-modern.mjs  # stdio, 2026-07-28 protocol; no token needed
+node scripts/smoke-http.mjs    # HTTP transport on both protocols, auth, security gates
 ```
 
 The unit and smoke suites need no Discord token, so anyone can run them. They
@@ -135,7 +136,7 @@ node scripts/acceptance.mjs
 things.** It cleans up after itself, but it must only ever be pointed at a
 **disposable test server you own**. Never run it against a live community.
 
-It reads `DISCORD_TOKEN` and `OMNICORD_GUILD` from `.env`. Create a throwaway
+It reads `DISCORD_TOKEN` and `DISCORD_MCP_GUILD` from `.env`. Create a throwaway
 Discord application and an empty server for it, and double check
 `get_bot_info` reports the bot and guild you expect before you run it.
 
@@ -175,7 +176,7 @@ const gate = gateDestructive({
 if (gate) return gate;
 
 // Only reachable with a valid token, or with safe mode off.
-await rest.delete(Routes.channel(target.id), { reason: "Deleted via Omnicord" });
+await rest.delete(Routes.channel(target.id), { reason: "Deleted via discord-mcp" });
 ```
 
 If you add a tool that deletes content, removes access, punishes a member, or

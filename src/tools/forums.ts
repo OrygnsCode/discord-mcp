@@ -5,12 +5,15 @@ import type {
   RESTGetAPIGuildThreadsResult,
 } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
-import { invalidateGuildCaches, type GuildChannelLite } from "../discord/guildData.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
+import { getChannels, invalidateGuildCaches, type GuildChannelLite } from "../discord/guildData.js";
 import { resolveOne } from "../discord/resolve.js";
 import { gateDestructive } from "../safety.js";
+import { plainText, quoted } from "../discord/names.js";
+import { channelLabel } from "../discord/grants.js";
 import { ok, fail } from "../envelope.js";
+import { filesParam, prepareFiles, type PreparedFiles } from "../discord/uploads.js";
 import {
   enter,
   guarded,
@@ -20,7 +23,10 @@ import {
   botPermissions,
   requirePermissions,
   embedsParam,
+  embedFilesProblem,
   mapEmbeds,
+  confirmTokenParam,
+  archivedThreads,
 } from "./common.js";
 
 // Forum channels: posts are threads underneath, tags live on the channel.
@@ -45,6 +51,15 @@ async function resolveForum(
   query: string
 ): Promise<ForumChannel> {
   return (await resolveChannel(rest, guildId, query, [15])) as ForumChannel;
+}
+
+// The forum with its tags as they are right now. Adding, changing, or
+// removing a tag sends the whole tag list back, and the channel list it
+// would otherwise come from can be half a minute old: a tag someone added
+// in that time was dropped by the next edit here.
+async function withCurrentTags(rest: REST, forum: ForumChannel): Promise<ForumChannel> {
+  const now = (await rest.get(Routes.channel(forum.id))) as ForumChannel;
+  return { ...forum, available_tags: now.available_tags ?? [] };
 }
 
 function resolveTagByName(
@@ -86,7 +101,7 @@ function postDigest(t: APIThreadChannel, forum?: ForumChannel) {
 
 export function registerForumTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "create_forum_post",
@@ -94,7 +109,8 @@ export function registerForumTools(
       title: "Create forum post",
       description:
         "Start a post in a forum channel: a title, the opening message, " +
-        "and optional tags from the forum's tag list.",
+        "optional tags from the forum's tag list, and up to 10 files fetched " +
+        "from public URLs.",
       inputSchema: {
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
@@ -102,36 +118,57 @@ export function registerForumTools(
         content: z.string().min(1).max(2000),
         tags: z.array(z.string()).max(5).optional()
           .describe("Tag names to apply."),
+        files: filesParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ forum, guild, title, content, tags }) => {
+    guarded(async ({ forum, guild, title, content, tags, files }) => {
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveForum(rest, guildId, forum);
 
       const perms = await botPermissions(rest, guildId, target);
-      requirePermissions(perms, [[P.SendMessages, "Send Messages"]], `in ${target.name}`);
+      requirePermissions(
+        perms,
+        [
+          [P.SendMessages, "Send Messages"],
+          ...(files ? ([[P.AttachFiles, "Attach Files"]] as Array<[bigint, string]>) : []),
+        ],
+        `in ${channelLabel(target)}`
+      );
 
       const appliedTags = (tags ?? []).map(
         (name) => resolveTagByName(target, name).id as string
       );
+
+      let prepared: PreparedFiles | undefined;
+      if (files) {
+        const got = await prepareFiles(files);
+        if (!got.ok) return fail(`Nothing was posted. ${got.error}`);
+        prepared = got.value;
+      }
 
       const post = (await rest.post(Routes.threads(target.id), {
         body: {
           name: title,
           // Mentions suppressed: a model echoing user text into a new
           // forum post must not be able to mass-ping by accident.
-          message: { content, allowed_mentions: { parse: [] } },
+          message: {
+            content,
+            allowed_mentions: { parse: [] },
+            ...(prepared ? { attachments: prepared.attachments } : {}),
+          },
           ...(appliedTags.length > 0 ? { applied_tags: appliedTags } : {}),
         },
-        reason: "Created via Omnicord",
+        ...(prepared ? { files: prepared.files } : {}),
+        reason: "Created via discord-mcp",
       })) as APIThreadChannel;
 
       return ok(
-        `Posted "${title}" in ${target.name}` +
+        `Posted "${title}" in ${channelLabel(target)}` +
           (tags?.length ? ` tagged ${tags.join(", ")}` : "") +
+          (prepared ? ` with ${prepared.files.length} file(s)` : "") +
           ".",
-        postDigest(post, target)
+        { ...postDigest(post, target), ...(prepared ? { files: prepared.summary } : {}) }
       );
     })
   );
@@ -161,21 +198,23 @@ export function registerForumTools(
       let posts = ((activeResult.threads ?? []) as APIThreadChannel[]).filter(
         (t) => t.parent_id === target.id
       );
+      let moreArchived = false;
       if (include_archived) {
-        const archived = (await rest.get(
-          Routes.channelThreads(target.id, "public")
-        )) as { threads: APIThreadChannel[] };
-        posts = posts.concat(archived.threads ?? []);
+        const archived = await archivedThreads(rest, target.id);
+        posts = posts.concat(archived.threads);
+        moreArchived = archived.more;
       }
       if (tagId) {
         posts = posts.filter((t) => (t.applied_tags ?? []).includes(tagId));
       }
 
       return ok(
-        `${posts.length} post(s) in ${target.name}` +
+        `${posts.length} post(s) in ${channelLabel(target)}` +
           (tag ? ` tagged ${tag}` : "") +
+          (moreArchived ? ", counting only the most recently archived" : "") +
           ".",
-        { posts: posts.map((p) => postDigest(p, target)) }
+        { posts: posts.map((p) => postDigest(p, target)), ...(include_archived ? { more_archived: moreArchived } : {}) },
+        moreArchived ? ["Older archived posts exist beyond the ones read; they were left out."] : []
       );
     })
   );
@@ -184,28 +223,41 @@ export function registerForumTools(
     "reply_to_forum_post",
     {
       title: "Reply to forum post",
-      description: "Add a reply inside a forum post.",
+      description: "Add a reply inside a forum post: text, embeds, or both.",
       inputSchema: {
         post: z.string().describe("Post title or thread ID."),
         guild: guildParam,
-        content: z.string().min(1).max(2000),
+        content: z.string().min(1).max(2000).optional()
+          .describe("Reply text. May be left out when embeds carry the reply."),
         embeds: embedsParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     guarded(async ({ post, guild, content, embeds }) => {
+      if (content === undefined && !(embeds && embeds.length > 0)) {
+        return fail("Pass content or embeds.");
+      }
+      // Both are decided from the arguments, so neither costs a request.
+      const cards = embeds && embeds.length > 0 ? mapEmbeds(embeds) : undefined;
+      const lost = embedFilesProblem(embeds, [], {
+        some: "",
+        none:
+          "reply_to_forum_post sends no files. Use an http or https link, or reply with " +
+          "send_message, which takes the post as its channel and sends files.",
+      });
+      if (lost) return fail(`Nothing was sent. ${lost}`);
       const { rest, guildId } = await enter(config, guild);
       const found = await findPost(rest, guildId, post);
 
       const sent = (await rest.post(Routes.channelMessages(found.id), {
         body: {
-          content,
+          ...(content !== undefined ? { content } : {}),
           allowed_mentions: { parse: [] },
-          ...(embeds && embeds.length > 0 ? { embeds: mapEmbeds(embeds) } : {}),
+          ...(cards ? { embeds: cards } : {}),
         },
       })) as { id: string };
 
-      return ok(`Replied in "${found.name}".`, {
+      return ok(`Replied in ${quoted(found.name)}.`, {
         id: sent.id,
         post: { id: found.id, title: found.name },
       });
@@ -266,9 +318,9 @@ export function registerForumTools(
 
       await rest.patch(Routes.channel(found.id), {
         body,
-        reason: "Updated via Omnicord",
+        reason: "Updated via discord-mcp",
       });
-      return ok(`Updated "${found.name}": ${changes.join(", ")}.`, {
+      return ok(`Updated ${quoted(found.name)}: ${changes.join(", ")}.`, {
         id: found.id,
         changed: changes,
       });
@@ -288,7 +340,7 @@ export function registerForumTools(
         guild: guildParam,
         reason: z.string().max(400).optional(),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -305,16 +357,16 @@ export function registerForumTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would delete the post "${found.name}" and its ` +
+          `Would delete the post ${quoted(found.name)} and its ` +
           `${found.message_count ?? 0} message(s) forever.`,
         previewDetails: { id: found.id, title: found.name },
       });
       if (gate) return gate;
 
       await rest.delete(Routes.channel(found.id), {
-        reason: reason ?? "Deleted via Omnicord",
+        reason: reason ?? "Deleted via discord-mcp",
       });
-      return ok(`Deleted the post "${found.name}".`, {
+      return ok(`Deleted the post ${quoted(found.name)}.`, {
         deleted: true,
         id: found.id,
       });
@@ -338,10 +390,10 @@ export function registerForumTools(
     },
     guarded(async ({ forum, guild, name, moderated }) => {
       const { rest, guildId } = await enter(config, guild);
-      const target = await resolveForum(rest, guildId, forum);
+      const target = await withCurrentTags(rest, await resolveForum(rest, guildId, forum));
 
       const perms = await botPermissions(rest, guildId, target);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${target.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${channelLabel(target)}`);
 
       const existing = target.available_tags ?? [];
       if (existing.length >= 20) {
@@ -358,14 +410,14 @@ export function registerForumTools(
             { name, moderated: moderated ?? false },
           ],
         },
-        reason: "Tag added via Omnicord",
+        reason: "Tag added via discord-mcp",
       })) as ForumChannel;
       invalidateGuildCaches(guildId);
 
       const created = (updated.available_tags ?? []).find(
         (t) => t.name === name
       );
-      return ok(`Added the tag "${name}" to ${target.name}.`, {
+      return ok(`Added the tag "${name}" to ${channelLabel(target)}.`, {
         id: created?.id ?? null,
         name,
         moderated: moderated ?? false,
@@ -389,13 +441,13 @@ export function registerForumTools(
     },
     guarded(async ({ forum, guild, tag, name, moderated }) => {
       const { rest, guildId } = await enter(config, guild);
-      const target = await resolveForum(rest, guildId, forum);
+      const target = await withCurrentTags(rest, await resolveForum(rest, guildId, forum));
       if (name === undefined && moderated === undefined) {
         return fail("Pass name or moderated to change.");
       }
 
       const perms = await botPermissions(rest, guildId, target);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${target.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${channelLabel(target)}`);
 
       const current = resolveTagByName(target, tag);
       const updatedTags = (target.available_tags ?? []).map((t) =>
@@ -410,12 +462,12 @@ export function registerForumTools(
 
       await rest.patch(Routes.channel(target.id), {
         body: { available_tags: updatedTags },
-        reason: "Tag updated via Omnicord",
+        reason: "Tag updated via discord-mcp",
       });
       invalidateGuildCaches(guildId);
 
       return ok(
-        `Updated the tag "${current.name}"` +
+        `Updated the tag ${quoted(current.name)}` +
           (name ? ` to "${name}"` : "") +
           ".",
         { id: current.id, name: name ?? current.name }
@@ -437,16 +489,16 @@ export function registerForumTools(
         guild: guildParam,
         tag: z.string().describe("Tag name to remove."),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     guarded(async ({ forum, guild, tag, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
-      const target = await resolveForum(rest, guildId, forum);
+      const target = await withCurrentTags(rest, await resolveForum(rest, guildId, forum));
 
       const perms = await botPermissions(rest, guildId, target);
-      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${target.name}`);
+      requirePermissions(perms, [[P.ManageChannels, "Manage Channels"]], `for ${channelLabel(target)}`);
 
       const current = resolveTagByName(target, tag);
       const gate = gateDestructive({
@@ -455,7 +507,7 @@ export function registerForumTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would remove the tag "${current.name}" from ${target.name}; ` +
+          `Would remove the tag ${quoted(current.name)} from #${plainText(target.name)}; ` +
           "posts carrying it lose it.",
         previewDetails: { id: current.id, name: current.name },
       });
@@ -467,11 +519,11 @@ export function registerForumTools(
             (t) => t.id !== current.id
           ),
         },
-        reason: "Tag removed via Omnicord",
+        reason: "Tag removed via discord-mcp",
       });
       invalidateGuildCaches(guildId);
 
-      return ok(`Removed the tag "${current.name}" from ${target.name}.`, {
+      return ok(`Removed the tag ${quoted(current.name)} from ${channelLabel(target)}.`, {
         deleted: true,
         id: current.id,
       });
@@ -485,10 +537,18 @@ export function registerForumTools(
     guildId: string,
     query: string
   ): Promise<APIThreadChannel> {
+    // Forum and media channels: only threads under one of these are posts.
+    // Every active thread in the server used to count, so a post tool given
+    // a name could land on an ordinary thread in a text channel.
+    const forums = new Set(
+      (await getChannels(rest, guildId)).filter((c) => c.type === 15 || c.type === 16).map((c) => c.id)
+    );
     const activeResult = (await rest.get(
       Routes.guildActiveThreads(guildId)
     )) as RESTGetAPIGuildThreadsResult;
-    const posts = (activeResult.threads ?? []) as APIThreadChannel[];
+    const posts = ((activeResult.threads ?? []) as APIThreadChannel[]).filter(
+      (p) => p.parent_id && forums.has(p.parent_id)
+    );
     const resolution = resolveOne(
       query,
       posts.map((p) => ({ id: p.id, name: p.name ?? "", type: "post" }))
@@ -498,8 +558,13 @@ export function registerForumTools(
       if (found) return found;
     }
     if (/^\d{17,20}$/.test(query.trim())) {
-      const direct = await resolveChannel(rest, guildId, query, [10, 11, 12]);
-      return direct as unknown as APIThreadChannel;
+      const direct = (await resolveChannel(rest, guildId, query, [10, 11, 12])) as unknown as APIThreadChannel;
+      if (!direct.parent_id || !forums.has(direct.parent_id)) {
+        throw new ToolProblem(
+          fail(`${quoted(direct.name ?? query)} is a thread in a text channel, not a forum post. The thread tools work on it.`)
+        );
+      }
+      return direct;
     }
     const candidates = "candidates" in resolution ? resolution.candidates : [];
     throw new ToolProblem(

@@ -8,8 +8,8 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
-const IMAGE = "omnicord:smoke";
-const NAME = "omnicord-smoke";
+const IMAGE = "discord-mcp:smoke";
+const NAME = "discord-mcp-smoke";
 const PORT = 18414;
 const TOKEN = "docker-smoke-secret";
 
@@ -63,7 +63,7 @@ const refusal = await docker(
 );
 check(refusal.code !== 0, "tokenless container refuses to start");
 check(
-  refusal.stderr.includes("OMNICORD_HTTP_TOKEN"),
+  refusal.stderr.includes("DISCORD_MCP_HTTP_TOKEN"),
   "refusal message names the fix"
 );
 
@@ -72,7 +72,7 @@ await docker(
   "run", "-d", "--name", NAME,
   "-p", `${PORT}:3414`,
   "-e", "DISCORD_TOKEN=",
-  "-e", `OMNICORD_HTTP_TOKEN=${TOKEN}`,
+  "-e", `DISCORD_MCP_HTTP_TOKEN=${TOKEN}`,
   IMAGE
 );
 
@@ -93,7 +93,7 @@ for (let i = 0; i < 40; i += 1) {
 check(healthy, "containerized server answers health checks");
 
 const health = healthy ? await (await fetch(`${BASE}/healthz`)).json() : {};
-check(health.name === "omnicord", "health reports omnicord");
+check(health.name === "discord-mcp", "health reports discord-mcp");
 
 const initBody = JSON.stringify({
   jsonrpc: "2.0",
@@ -118,15 +118,27 @@ const withAuth = await fetch(`${BASE}/mcp`, {
   headers: { ...headers, Authorization: `Bearer ${TOKEN}` },
   body: initBody,
 });
-const initJson = await withAuth.json().catch(() => ({}));
+// 2025-era stateless serving answers as an SSE stream; the JSON-RPC reply
+// is the last data frame.
+const initText = await withAuth.text().catch(() => "");
+const initFrames = initText
+  .split(/\r?\n/)
+  .filter((line) => line.startsWith("data:"))
+  .map((line) => line.slice(5).trim());
+let initJson = {};
+try {
+  initJson = JSON.parse(initFrames.length > 0 ? initFrames[initFrames.length - 1] : initText);
+} catch {
+  initJson = {};
+}
 check(withAuth.status === 200, "authorized initialize succeeds in the container");
 check(
-  initJson?.result?.serverInfo?.name === "omnicord",
-  "container identifies as omnicord over mcp"
+  initJson?.result?.serverInfo?.name === "discord-mcp",
+  "container identifies as discord-mcp over mcp"
 );
 
 const whoami = await docker("exec", NAME, "whoami");
-check(whoami.stdout.trim() === "omnicord", "container runs as a non-root user");
+check(whoami.stdout.trim() === "discord-mcp", "container runs as a non-root user");
 
 await cleanup();
 

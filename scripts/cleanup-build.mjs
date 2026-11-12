@@ -1,22 +1,26 @@
 // Removes everything a run-blueprint.mjs build created, reading the saved
 // .demo-build.json report. Channels go first, then categories, then roles.
 // Runs with safe mode off because this is a scripted, single-purpose
-// cleanup; interactive deletion should keep the confirmation gate.
+// cleanup; interactive deletion should keep the confirmation gate. It
+// deletes with no confirmation, so it runs only against a known test
+// server, or one named with --server=<id> (see guard.mjs).
 //
-// Usage: node scripts/cleanup-build.mjs
+// Usage: node scripts/cleanup-build.mjs [--server=<id>]
 
 import { spawn } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { requireNamedServer } from "./guard.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const reportPath = join(root, ".demo-build.json");
 const { report } = JSON.parse(readFileSync(reportPath, "utf8"));
+await requireNamedServer(process.argv.slice(2), "delete what the build created");
 
 const child = spawn(process.execPath, [join(root, "dist", "index.js")], {
   cwd: root,
-  env: { ...process.env, OMNICORD_SAFE_MODE: "false" },
+  env: { ...process.env, DISCORD_MCP_SAFE_MODE: "false" },
   stdio: ["pipe", "pipe", "inherit"],
 });
 
@@ -62,7 +66,7 @@ async function callTool(name, args) {
 await request("initialize", {
   protocolVersion: "2025-06-18",
   capabilities: {},
-  clientInfo: { name: "omnicord-cleanup", version: "0.0.1" },
+  clientInfo: { name: "discord-mcp-cleanup", version: "0.0.1" },
 });
 child.stdin.write(
   JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n"

@@ -27,8 +27,14 @@ const stats: RateLimitStats = {
   attached: false,
 };
 
+// Every bot's client is observed, each once. A single flag used to stop
+// after the first, so with several bots only the first one's rate limits
+// were ever counted.
+const observed = new WeakSet<REST>();
+
 export function attachRateLimitObserver(rest: REST): void {
-  if (stats.attached) return;
+  if (observed.has(rest)) return;
+  observed.add(rest);
   stats.attached = true;
 
   rest.on("rateLimited", (info) => {

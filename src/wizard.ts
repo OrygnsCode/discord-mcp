@@ -10,11 +10,26 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { VERSION } from "./config.js";
-import { envFilePath, botsFilePath, configDir, IS_INSTALLED } from "./home.js";
+import {
+  envFilePath,
+  botsFilePath,
+  appHome,
+  defaultHome,
+  legacyHome,
+  writePrivateFile,
+  moveLegacyHome,
+  usingLegacyHome,
+  IS_INSTALLED,
+} from "./home.js";
+import { COMMAND, PACKAGE_NAME } from "./identity.js";
 import { copyToStableHome, inNpxCache } from "./install.js";
 import { bold, cyan, dim, green, red, rule, underline, yellow } from "./term.js";
 import { readIntents, type IntentStatus } from "./discord/intents.js";
 import {
+  CLIENT_KEY,
+  carriedSettings,
+  clientConfigState,
+  claudeCodeLegacyScopes,
   mergeClientConfig,
   envUpsert,
   envRemoveKey,
@@ -26,13 +41,14 @@ import {
   uniqueBotName,
   serializeBotsFile,
   addBotToBotsFile,
+  type ConfigCandidate,
   type WizardBot,
 } from "./wizardLib.js";
 
-// The interactive setup wizard: omnicord init. Walks from a bare Discord
-// application to a working client config, validating each step against
-// the live API instead of hoping. The pure logic lives in wizardLib.ts;
-// this file is the conversation.
+// The interactive setup wizard: orygn-discord-mcp init. Walks from a bare
+// Discord application to a working client config, validating each step
+// against the live API instead of hoping. The pure logic lives in
+// wizardLib.ts; this file is the conversation.
 
 const PORTAL = "https://discord.com/developers/applications";
 
@@ -133,6 +149,13 @@ async function ask(prompt: string): Promise<string> {
   return answer;
 }
 
+// A yes/no question. Enter takes the default.
+async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
+  const answer = (await ask(`${prompt} ${dim(defaultYes ? "[Y/n]" : "[y/N]")}: `)).toLowerCase();
+  if (answer === "") return defaultYes;
+  return answer === "y" || answer === "yes";
+}
+
 // Token input with no echo: raw mode suppresses terminal echo while the
 // same character consumer keeps collecting the line. Piped input reads a
 // plain line, so the wizard stays scriptable.
@@ -188,12 +211,13 @@ async function fetchAppInfo(token: string): Promise<AppInfo | undefined> {
 
 export async function runWizard(): Promise<void> {
   console.log("");
-  console.log(`  ${bold(cyan("Omnicord"))} ${dim("by Orygn")}`);
+  console.log(`  ${bold(cyan("Discord MCP"))} ${dim("by Orygn")}`);
   console.log(`  ${dim(rule())}`);
   console.log(`  ${dim(`Setup v${VERSION}. Type q at any prompt to quit; nothing is`)}`);
   console.log(`  ${dim("changed until it says so.")}\n`);
 
   try {
+    if (await offerUpgrade()) return;
     const cfg = readExistingConfig();
     const hasExisting = cfg.envToken !== undefined || cfg.bots.length > 0;
 
@@ -238,6 +262,120 @@ export async function runWizard(): Promise<void> {
     throw err;
   } finally {
     process.stdin.pause();
+  }
+}
+
+// The AI clients whose config files the wizard knows how to find.
+function detectClients(): ConfigCandidate[] {
+  return clientConfigCandidates({
+    platform: process.platform,
+    homedir: homedir(),
+    appData: process.env.APPDATA,
+    localAppData: process.env.LOCALAPPDATA,
+    cwd: process.cwd(),
+  });
+}
+
+// Before 2.0 this server was called Omnicord: registered under "omnicord"
+// and keeping its settings in ~/.omnicord. Finding that setup, the wizard
+// offers one step that points every old entry it can edit at this version
+// and then moves the settings folder. The folder only moves when no old
+// entry is left that still runs the previous version, since that version
+// reads it. Returns true when the upgrade ran and the wizard is done, false
+// to carry on with the normal flow.
+async function offerUpgrade(): Promise<boolean> {
+  const legacyFiles = detectClients().filter((c) => {
+    if (!c.exists) return false;
+    try {
+      return clientConfigState(readFileSync(c.path, "utf8")).hasLegacy;
+    } catch {
+      return false;
+    }
+  });
+  const claudeJson = join(homedir(), ".claude.json");
+  const codeScopes = existsSync(claudeJson)
+    ? claudeCodeLegacyScopes(readFileSync(claudeJson, "utf8"))
+    : [];
+  const settingsToMove = usingLegacyHome();
+  if (legacyFiles.length === 0 && codeScopes.length === 0 && !settingsToMove) return false;
+
+  console.log(`  ${bold("Omnicord is now discord-mcp.")}`);
+  if (legacyFiles.length > 0) {
+    console.log("  The previous version is registered in:");
+    for (const c of legacyFiles) console.log(`    ${c.label} ${dim(c.path)}`);
+  }
+  if (settingsToMove) console.log(`  Its settings are in ${legacyHome()}.`);
+
+  if (legacyFiles.length === 0 && !settingsToMove) {
+    // Only Claude Code's own config has it, which the wizard does not edit.
+    printClaudeCodeSteps(codeScopes);
+    return false;
+  }
+
+  const what = [
+    legacyFiles.length > 0
+      ? `switch ${legacyFiles.length === 1 ? "it" : "them"} to this version`
+      : undefined,
+    settingsToMove && codeScopes.length === 0
+      ? `move the settings to ${defaultHome()}`
+      : undefined,
+  ].filter(Boolean);
+  if (what.length === 0) {
+    printClaudeCodeSteps(codeScopes);
+    return false;
+  }
+  const go = await confirm(`\n  ${what.join(" and ").replace(/^./, (c) => c.toUpperCase())}?`, true);
+  if (!go) {
+    console.log(dim("  Nothing changed. The previous version keeps working as it is.\n"));
+    return false;
+  }
+
+  let allSwitched = true;
+  if (legacyFiles.length > 0) {
+    const entryPath = durableEntryPath();
+    if (!entryPath) return true;
+    const entry = { command: "node", args: [entryPath] };
+    for (const target of legacyFiles) {
+      if (!(await writeClientEntry(target, entry))) allSwitched = false;
+    }
+  }
+
+  if (settingsToMove) {
+    if (!allSwitched || codeScopes.length > 0) {
+      console.log(
+        `\n  Your settings stay in ${legacyHome()} for now, since something there still runs the previous version.`
+      );
+      console.log(dim(`  Run ${COMMAND} init again once it is switched over to move them.`));
+    } else {
+      try {
+        const move = moveLegacyHome(legacyHome(), defaultHome());
+        console.log(`\n  ${green("Moved your settings")} to ${defaultHome()}`);
+        if (move.renamedSettings.length > 0) {
+          console.log(dim(`  Renamed ${move.renamedSettings.join(", ")} to the DISCORD_MCP_ names.`));
+        }
+      } catch (err) {
+        console.log(yellow(`\n  Could not move the settings: ${(err as Error).message}`));
+        console.log(dim(`  They keep working where they are, in ${legacyHome()}.`));
+      }
+    }
+  }
+
+  printClaudeCodeSteps(codeScopes);
+  printRestartSteps();
+  return true;
+}
+
+// Claude Code keeps its MCP servers in ~/.claude.json alongside live state,
+// so the wizard prints the commands rather than editing that file. No token
+// goes on the command line: the server reads it from its own .env.
+function printClaudeCodeSteps(scopes: string[]): void {
+  if (scopes.length === 0) return;
+  console.log(`\n  ${bold("Claude Code")} still has the previous version registered. To switch it:`);
+  for (const scope of scopes) {
+    const flag = scope === "user" ? " -s user" : "";
+    if (scope !== "user") console.log(dim(`  In ${scope}:`));
+    console.log(`    ${cyan(`claude mcp remove omnicord${flag}`)}`);
+    console.log(`    ${cyan(`claude mcp add ${CLIENT_KEY}${flag} -- npx -y ${PACKAGE_NAME}`)}`);
   }
 }
 
@@ -379,9 +517,6 @@ async function pickDefaultServer(token: string): Promise<string> {
   return "";
 }
 
-// Register the omnicord server in a client config once, regardless of how many
-// bots were set up. Unchanged behavior: adds only the omnicord entry, backs the
-// file up first, and never clobbers invalid JSON.
 // The entry file to register. Run through npx, the wizard is running out of
 // npm's npx cache, which npm can clear at any time, so the package is copied
 // somewhere permanent first (see install.ts). Returns undefined when that
@@ -389,8 +524,8 @@ async function pickDefaultServer(token: string): Promise<string> {
 // only postpone the failure to some later day.
 function durableEntryPath(): string | undefined {
   if (!inNpxCache(packageRoot)) return join(packageRoot, "dist", "index.js");
-  const home = configDir();
-  console.log(dim("\n  npx runs Omnicord from a cache folder that npm does not keep, so"));
+  const home = appHome();
+  console.log(dim("\n  npx runs this from a cache folder that npm does not keep, so"));
   console.log(dim(`  it is being copied to ${join(home, "app", VERSION)} first.`));
   try {
     const copy = copyToStableHome(packageRoot, home, VERSION);
@@ -398,33 +533,83 @@ function durableEntryPath(): string | undefined {
     return copy.entry;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.log(red(`  Could not copy Omnicord out of the npx cache: ${reason}`));
+    console.log(red(`  Could not copy it out of the npx cache: ${reason}`));
     console.log("  Nothing was registered, because the cached copy would stop working");
-    console.log("  as soon as npm clears it. Install Omnicord permanently instead:");
-    console.log(`  ${cyan("npm install -g @orygn/omnicord")}, then ${cyan("omnicord init")} and choose to re-register.`);
+    console.log("  as soon as npm clears it. Install it permanently instead:");
+    console.log(`  ${cyan(`npm install -g ${PACKAGE_NAME}`)}, then ${cyan(`${COMMAND} init`)} and choose to re-register.`);
     return undefined;
   }
 }
 
-// Returns false when nothing could be registered; the reason is already on
-// screen by then.
+function printSnippet(entry: { command: string; args: string[] }): void {
+  console.log(JSON.stringify({ mcpServers: { [CLIENT_KEY]: entry } }, null, 2));
+}
+
+// Writes the discord-mcp entry into one client config file, backing the file
+// up first and never touching invalid JSON. Any entry from before the rename
+// in that file is removed in the same write, so the server never runs twice.
+// When the file already has a different server under the discord-mcp key,
+// it asks before replacing it. Returns false when nothing was written.
+async function writeClientEntry(
+  target: ConfigCandidate,
+  entry: { command: string; args: string[] }
+): Promise<boolean> {
+  const before = existsSync(target.path) ? readFileSync(target.path, "utf8") : undefined;
+  let state: ReturnType<typeof clientConfigState>;
+  try {
+    state = clientConfigState(before);
+  } catch {
+    console.log(yellow(`  ${target.path} is not valid JSON, so it was left untouched.`));
+    console.log("  Add this to that file's mcpServers by hand:\n");
+    printSnippet(entry);
+    return false;
+  }
+
+  if (state.foreignEntry !== undefined) {
+    console.log(`\n  A different Discord MCP is already set up in ${target.label} as "${CLIENT_KEY}":`);
+    console.log(dim(`    ${JSON.stringify(state.foreignEntry).slice(0, 160)}`));
+    console.log("  Two side by side give your AI duplicate tools to trip over, so we'd");
+    console.log("  keep one. We're a little biased about which.");
+    const replace = await confirm("  Replace it? Your current config is backed up first.", true);
+    if (!replace) {
+      console.log(dim(`  Left ${target.path} as it is. To add this server under another name,`));
+      console.log(dim("  paste this into its mcpServers and rename the key:\n"));
+      printSnippet(entry);
+      return false;
+    }
+  }
+
+  // The pre-2.0 home is about to move, so an entry that names it outright
+  // would be left pointing at an empty folder.
+  const movedHomes = [legacyHome()];
+  const merged = mergeClientConfig(before, entry, { movedHomes });
+  const carried = carriedSettings(before, movedHomes, entry);
+  if (before !== undefined) {
+    const backup = `${target.path}.bak-${CLIENT_KEY}-${Date.now()}`;
+    copyFileSync(target.path, backup);
+    console.log(dim(`  Backed up the existing file to ${backup}`));
+  }
+  mkdirSync(dirname(target.path), { recursive: true });
+  writeFileSync(target.path, merged);
+  console.log(`  ${green(`Wrote ${CLIENT_KEY} into`)} ${target.path}`);
+  if (state.hasLegacy) console.log(dim("  Removed the previous version's entry from that file."));
+  if (carried.length > 0) console.log(dim(`  Kept what the entry already set: ${carried.join(", ")}.`));
+  return true;
+}
+
+// Register the server in one client config, regardless of how many bots were
+// set up. Returns false when nothing could be registered; the reason is
+// already on screen by then.
 async function registerClient(): Promise<boolean> {
   const entryPath = durableEntryPath();
   if (!entryPath) return false;
 
-  const candidates = clientConfigCandidates({
-    platform: process.platform,
-    homedir: homedir(),
-    appData: process.env.APPDATA,
-    localAppData: process.env.LOCALAPPDATA,
-    cwd: process.cwd(),
-  });
-  const present = candidates.filter(
+  const present = detectClients().filter(
     (c) => c.exists || c.appPresent || c.client === "claude-code"
   );
 
-  console.log("\n  Where should the omnicord server be registered?");
-  console.log(dim('  This only adds an "omnicord" entry; everything else in the file'));
+  console.log("\n  Where should the server be registered?");
+  console.log(dim(`  This only writes a "${CLIENT_KEY}" entry; everything else in the file`));
   console.log(dim("  is left as-is, and the original is backed up first."));
   present.forEach((c, idx) =>
     console.log(
@@ -450,31 +635,12 @@ async function registerClient(): Promise<boolean> {
   const whereIndex = where === "" ? defaultChoice : Number(where);
 
   if (Number.isInteger(whereIndex) && whereIndex >= 1 && whereIndex <= present.length) {
-    const target = present[whereIndex - 1];
-    const before = existsSync(target.path) ? readFileSync(target.path, "utf8") : undefined;
-    let merged: string | undefined;
-    try {
-      merged = mergeClientConfig(before, entry);
-    } catch {
-      merged = undefined;
-    }
-    if (merged === undefined) {
-      console.log(yellow(`  ${target.path} is not valid JSON, so it was left untouched.`));
-      console.log("  Add this to that file's mcpServers by hand:\n");
-      console.log(JSON.stringify({ mcpServers: { omnicord: entry } }, null, 2));
-    } else {
-      if (before !== undefined) {
-        const backup = `${target.path}.bak-omnicord-${Date.now()}`;
-        copyFileSync(target.path, backup);
-        console.log(dim(`  Backed up the existing file to ${backup}`));
-      }
-      mkdirSync(dirname(target.path), { recursive: true });
-      writeFileSync(target.path, merged);
-      console.log(`  ${green("Wrote omnicord into")} ${target.path}`);
-    }
+    // When the file cannot be written, a snippet to paste is already on
+    // screen, which still finishes the setup.
+    await writeClientEntry(present[whereIndex - 1], entry);
   } else {
     console.log("\n  Add this to your client's MCP config:\n");
-    console.log(JSON.stringify({ mcpServers: { omnicord: entry } }, null, 2));
+    printSnippet(entry);
   }
   return true;
 }
@@ -497,8 +663,12 @@ function writeEnvSingle(
   mkdirSync(dirname(cfg.envPath), { recursive: true });
   const before = existsSync(cfg.envPath) ? readFileSync(cfg.envPath, "utf8") : "";
   let text = envUpsert(before, "DISCORD_TOKEN", token);
-  if (defaultGuild) text = envUpsert(text, "OMNICORD_GUILD", defaultGuild);
-  writeFileSync(cfg.envPath, text);
+  if (defaultGuild) {
+    text = envUpsert(text, "DISCORD_MCP_GUILD", defaultGuild);
+    // The pre-2.0 name would only linger as a stale duplicate.
+    text = envRemoveKey(text, "OMNICORD_GUILD");
+  }
+  writePrivateFile(cfg.envPath, text);
   console.log(`  ${green("Token saved")} to ${cfg.envPath}`);
   console.log(
     `  ${dim(
@@ -517,7 +687,7 @@ function writeEnvSingle(
 // so it does not load as an extra bot.
 function writeBotsMulti(cfg: ExistingConfig, bots: WizardBot[]): void {
   mkdirSync(dirname(cfg.botsPath), { recursive: true });
-  writeFileSync(cfg.botsPath, serializeBotsFile(bots));
+  writePrivateFile(cfg.botsPath, serializeBotsFile(bots));
   console.log(`  ${green("Bots saved")} to ${cfg.botsPath}`);
   console.log(
     `  ${dim(
@@ -531,7 +701,7 @@ function writeBotsMulti(cfg: ExistingConfig, bots: WizardBot[]): void {
     if (/^\s*DISCORD_TOKEN\s*=\s*\S/m.test(before)) {
       const after = envRemoveKey(before, "DISCORD_TOKEN");
       if (after.trim().length === 0) rmSync(cfg.envPath);
-      else writeFileSync(cfg.envPath, after);
+      else writePrivateFile(cfg.envPath, after);
       console.log(dim("  Cleared the previous single-bot token from .env."));
     }
   }
@@ -541,7 +711,7 @@ function printBotList(bots: WizardBot[]): void {
   for (const b of bots) {
     console.log(`    ${bold(b.name)}${b.default ? dim(" (default)") : ""}`);
   }
-  console.log(dim("  Omnicord routes each server to the bot that is in it."));
+  console.log(dim("  Each server is routed to the bot that is in it."));
 }
 
 // First-time setup, or a from-scratch reconfigure. Asks how many bots and
@@ -613,7 +783,7 @@ async function runAddBot(cfg: ExistingConfig): Promise<void> {
   }
 
   content = addBotToBotsFile(content, { name: bot.name, token: bot.token });
-  writeFileSync(cfg.botsPath, content);
+  writePrivateFile(cfg.botsPath, content);
   console.log(`  ${green("Bots saved")} to ${cfg.botsPath}`);
 
   console.log(`\n${bold(green("Bot added."))}`);

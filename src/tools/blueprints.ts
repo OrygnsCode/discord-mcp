@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { getChannels, getRoles, getBotUser } from "../discord/guildData.js";
 import { blueprintSchema, type Blueprint } from "../builder/blueprint.js";
 import { exportBlueprint } from "../builder/export.js";
@@ -12,8 +12,12 @@ import {
   deleteBlueprint,
 } from "../builder/blueprintStore.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
 import { ok, fail } from "../envelope.js";
-import { enter, guarded, guildParam } from "./common.js";
+import { enter, enterBot, guarded, guildParam, hiddenChannelSummary, confirmTokenParam } from "./common.js";
+import { Routes } from "discord-api-types/v10";
+import { DiscordAPIError } from "@discordjs/rest";
+import { templateCode, templateSettings, templateToLive, type SerializedTemplateGuild } from "../builder/template.js";
 
 // The blueprint store: save designs, snapshot live servers into
 // blueprints, and detect drift between a design and reality.
@@ -31,7 +35,7 @@ function blueprintCounts(blueprint: Blueprint) {
 
 export function registerBlueprintTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "save_blueprint",
@@ -52,7 +56,7 @@ export function registerBlueprintTools(
       const saved = saveBlueprint(name, blueprint as Blueprint, description);
       if ("error" in saved) return fail(saved.error);
       return ok(
-        `Saved the blueprint "${saved.name}" (${saved.id}).`,
+        `Saved the blueprint ${quoted(saved.name)} (${saved.id}).`,
         {
           id: saved.id,
           name: saved.name,
@@ -100,7 +104,7 @@ export function registerBlueprintTools(
           available: listBlueprints().map((b) => b.name),
         });
       }
-      return ok(`Blueprint "${found.name}" (${found.id}).`, found);
+      return ok(`Blueprint ${quoted(found.name)} (${found.id}).`, found);
     })
   );
 
@@ -116,7 +120,7 @@ export function registerBlueprintTools(
       inputSchema: {
         blueprint: z.string().describe("Blueprint name or ID."),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -130,14 +134,14 @@ export function registerBlueprintTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would delete the saved blueprint "${found.name}". Servers ` +
+          `Would delete the saved blueprint ${quoted(found.name)}. Servers ` +
           "built from it are untouched; only the stored design goes.",
         previewDetails: { id: found.id, name: found.name },
       });
       if (gate) return gate;
 
       deleteBlueprint(found.id);
-      return ok(`Deleted the blueprint "${found.name}".`, {
+      return ok(`Deleted the blueprint ${quoted(found.name)}.`, {
         deleted: true,
         id: found.id,
       });
@@ -152,16 +156,20 @@ export function registerBlueprintTools(
         "Snapshot a live server's structure into a blueprint: roles, " +
         "categories, channels, and their visibility, with permission " +
         "overwrites decompiled back into private_to and read_only where " +
-        "they fit and warnings where they do not. Optionally save the " +
-        "result straight to the store with save_as.",
+        "they fit and warnings where they do not. Each item carries its id, " +
+        "so editing the export and planning it with update_existing renames " +
+        "and changes those exact items. Optionally save the result straight " +
+        "to the store with save_as.",
       inputSchema: {
         guild: guildParam,
         save_as: z.string().min(1).max(100).optional()
           .describe("Save the export under this blueprint name."),
+        include_ids: z.boolean().optional()
+          .describe("Default true. False for a design meant for other servers."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ guild, save_as }) => {
+    guarded(async ({ guild, save_as, include_ids }) => {
       const { rest, guildId } = await enter(config, guild);
       const [channels, roles, botUser] = await Promise.all([
         getChannels(rest, guildId),
@@ -171,11 +179,12 @@ export function registerBlueprintTools(
 
       const { blueprint, warnings } = exportBlueprint(channels, roles, guildId, {
         botUserId: botUser.id,
+        includeIds: include_ids !== false,
         ...(save_as ? { name: save_as } : {}),
       });
 
       // The export must always be a valid blueprint; a parse failure here
-      // is an Omnicord bug, not a user mistake.
+      // is a bug in this server, not a user mistake.
       const parsed = blueprintSchema.safeParse(blueprint);
       if (!parsed.success) {
         return fail(
@@ -192,6 +201,22 @@ export function registerBlueprintTools(
         savedId = saved.id;
       }
 
+      // Channels hidden from the bot are absent from the channel list, so
+      // they are absent from the export too. Never present it as complete
+      // without saying so.
+      const hidden = hiddenChannelSummary(rest, guildId, channels);
+      if (hidden.count) {
+        warnings.push(
+          `${hidden.count} channel(s) hidden from the bot (no View Channel) are not in this ` +
+            "export: Discord does not reveal them. Give the bot View Channel there for a complete export."
+        );
+      } else if (hidden.count === null) {
+        warnings.push(
+          "Any channels hidden from the bot (no View Channel) are not in this export; whether " +
+            "there are any is only known through the default bot's gateway connection."
+        );
+      }
+
       const counts = blueprintCounts(blueprint);
       return ok(
         `Exported the server: ${counts.roles} role(s), ` +
@@ -205,25 +230,123 @@ export function registerBlueprintTools(
   );
 
   server.registerTool(
+    "import_server_template",
+    {
+      title: "Import server template",
+      description:
+        "Turn a Discord server template link (discord.new/CODE or " +
+        "discord.com/template/CODE) into a blueprint: its roles, categories, " +
+        "channels, and who can see and post where. Nothing is built; plan " +
+        "the result with plan_server_build to build it on a server, after " +
+        "editing it if wanted. Optionally save it with save_as. The " +
+        "template's server settings (verification level, media filter, " +
+        "notifications) are listed for update_server, since blueprints do " +
+        "not carry them.",
+      inputSchema: {
+        template: z.string().min(2).max(200).describe("The template link or its code."),
+        save_as: z.string().min(1).max(100).optional()
+          .describe("Save the blueprint under this name."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    guarded(async ({ template, save_as }) => {
+      const code = templateCode(template);
+      if (!code) return fail(`"${template}" is not a template link or code.`);
+      const { rest } = enterBot(config);
+      let fetched: {
+        code: string;
+        name: string;
+        description?: string | null;
+        usage_count?: number;
+        creator?: { username?: string } | null;
+        updated_at?: string;
+        is_dirty?: boolean | null;
+        serialized_source_guild: SerializedTemplateGuild;
+      };
+      try {
+        fetched = (await rest.get(Routes.template(code))) as typeof fetched;
+      } catch (err) {
+        if (err instanceof DiscordAPIError && (err.status === 404 || err.code === 10057)) {
+          return fail(`No template with the code ${code}. It may have been deleted, or the link was mistyped.`);
+        }
+        throw err;
+      }
+      const live = templateToLive(fetched.serialized_source_guild);
+      const { blueprint, warnings } = exportBlueprint(live.channels, live.roles, live.guildId, {
+        includeIds: false,
+        name: save_as ?? fetched.name,
+      });
+      const parsed = blueprintSchema.safeParse(blueprint);
+      if (!parsed.success) {
+        return fail("The template did not convert into a valid blueprint, which is a bug worth reporting.", {
+          issues: parsed.error.issues.slice(0, 5),
+        });
+      }
+      let savedId: string | null = null;
+      if (save_as) {
+        const saved = saveBlueprint(save_as, blueprint);
+        if ("error" in saved) return fail(saved.error);
+        savedId = saved.id;
+      }
+      const settings = templateSettings(fetched.serialized_source_guild);
+      const counts = blueprintCounts(blueprint);
+      return ok(
+        `Template ${quoted(fetched.name)}` +
+          (fetched.creator?.username ? ` by ${quoted(fetched.creator.username)}` : "") +
+          (fetched.usage_count !== undefined ? `, used ${fetched.usage_count} time(s)` : "") +
+          `: ${counts.roles} role(s), ${counts.categories} categor(ies), ${counts.channels} channel(s)` +
+          (savedId ? `, saved as "${save_as}" (${savedId})` : "") +
+          ". Nothing was built; plan_server_build builds it.",
+        {
+          template: {
+            code: fetched.code,
+            name: fetched.name,
+            description: fetched.description ?? null,
+            usage_count: fetched.usage_count ?? null,
+            creator: fetched.creator?.username ?? null,
+            updated_at: fetched.updated_at ?? null,
+            ...(fetched.is_dirty ? { out_of_date: true } : {}),
+          },
+          blueprint,
+          ...(Object.keys(settings).length ? { server_settings: settings } : {}),
+          ...(savedId ? { saved_id: savedId } : {}),
+        },
+        [
+          ...warnings,
+          ...(fetched.is_dirty ? ["The template's source server has changed since it was last synced, so it may be out of date."] : []),
+        ]
+      );
+    })
+  );
+
+  server.registerTool(
     "diff_blueprint",
     {
       title: "Diff blueprint",
       description:
-        "Compare a saved blueprint against the live server: what the " +
-        "blueprint expects but the server lacks (missing), what exists " +
-        "but differs (changed, with the fields), and what the server has " +
-        "that the blueprint never mentioned (extra, informational). The " +
-        "drift detector for config-as-code workflows.",
+        "Compare a blueprint against the live server: what the blueprint " +
+        "expects but the server lacks (missing), what exists but differs " +
+        "(changed, with the fields), and what the server has that the " +
+        "blueprint never mentioned (extra, informational). Reads the " +
+        "blueprint as the whole truth, so a setting it leaves out counts as " +
+        "its default. The drift detector for config-as-code workflows. To act " +
+        "on it, plan_server_build applies changes with update_existing and " +
+        "deletes extras listed in remove.",
       inputSchema: {
-        blueprint: z.string().describe("Saved blueprint name or ID."),
+        blueprint: z
+          .union([z.string(), blueprintSchema])
+          .describe("A saved blueprint's name or ID, or a blueprint itself."),
         guild: guildParam,
       },
       annotations: { readOnlyHint: true },
     },
     guarded(async ({ blueprint, guild }) => {
-      const found = findBlueprint(blueprint);
+      const found =
+        typeof blueprint === "string"
+          ? findBlueprint(blueprint)
+          : { name: blueprint.name ?? "the blueprint", blueprint: blueprint as Blueprint };
       if (!found) {
-        return fail(`No saved blueprint matching "${blueprint}".`, {
+        return fail(`No saved blueprint matching "${blueprint as string}".`, {
           available: listBlueprints().map((b) => b.name),
         });
       }
@@ -243,15 +366,34 @@ export function registerBlueprintTools(
         diff.extra.categories.length +
         diff.extra.channels.length;
 
+      // A channel that exists but is hidden from the bot looks missing here.
+      const notes: string[] = [];
+      const missingChannels = diff.missing.channels.length + diff.missing.categories.length;
+      if (missingChannels > 0) {
+        const hidden = hiddenChannelSummary(rest, guildId, channels);
+        if (hidden.count) {
+          notes.push(
+            `${hidden.count} channel(s) in this server are hidden from the bot, so a channel ` +
+              "listed as missing may exist among them."
+          );
+        } else if (hidden.count === null) {
+          notes.push(
+            "A channel listed as missing may exist but be hidden from the bot (no View " +
+              "Channel); that is only known through the default bot's gateway connection."
+          );
+        }
+      }
+
       return ok(
         diff.in_sync
-          ? `The server matches "${found.name}"` +
+          ? `The server matches ${quoted(found.name)}` +
               (extraCount > 0
                 ? `, with ${extraCount} extra item(s) the blueprint does not mention.`
                 : " exactly.")
-          : `Drift from "${found.name}": ${missingCount} missing, ` +
+          : `Drift from ${quoted(found.name)}: ${missingCount} missing, ` +
               `${diff.changed.length} changed, ${extraCount} extra.`,
-        diff
+        diff,
+        notes
       );
     })
   );

@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@orygn/omnicord
+      url: https://www.npmjs.com/package/@orygn/discord-mcp
     permissions:
       id-token: write
       contents: read
@@ -169,7 +169,7 @@ jobs:
         run: |
           VERSION="$(jq -r .version server.json)"
           for attempt in $(seq 1 30); do
-            if npm view "@orygn/omnicord@$VERSION" version > /dev/null 2>&1; then
+            if npm view "@orygn/discord-mcp@$VERSION" version > /dev/null 2>&1; then
               echo "npm serves $VERSION."
               exit 0
             fi

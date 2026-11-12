@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { channelLabel } from "../discord/grants.js";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type {
   APIEmoji,
@@ -7,11 +8,13 @@ import type {
   RESTPostAPIChannelMessageJSONBody,
 } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { getBotUser } from "../discord/guildData.js";
 import { resolveEmojiInput } from "../discord/emoji.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import { describeDuration } from "./community.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -23,6 +26,8 @@ import {
   TEXT_BEARING_TYPES,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
+  messageIdParam,
 } from "./common.js";
 
 // Reactions and polls.
@@ -32,9 +37,10 @@ const P = PermissionFlagsBits;
 async function resolveEmoji(
   rest: REST,
   guildId: string,
-  input: string
+  input: string,
+  known?: APIEmoji[]
 ): Promise<{ api: string; display: string }> {
-  const guildEmojis = (await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[];
+  const guildEmojis = known ?? ((await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[]);
   const result = resolveEmojiInput(input, guildEmojis);
   if (!result.ok) {
     throw new ToolProblem(
@@ -46,7 +52,7 @@ async function resolveEmoji(
 
 export function registerReactionTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "add_reactions",
@@ -58,7 +64,7 @@ export function registerReactionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
         emojis: z.array(z.string()).min(1).max(10)
           .describe("Emoji to add, like a pasted emoji or a custom emoji name."),
       },
@@ -75,19 +81,39 @@ export function registerReactionTools(
           [P.AddReactions, "Add Reactions"],
           [P.ReadMessageHistory, "Read Message History"],
         ],
-        `in #${target.name}`
+        `in ${channelLabel(target)}`
       );
 
+      // Every emoji is worked out before the first reaction goes on, from one
+      // read of the server's emoji. A name that matches nothing used to fail
+      // the call after the reactions before it were already added, with no
+      // word that they had been.
+      const guildEmojis = (await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[];
+      const wanted: Array<{ api: string; display: string }> = [];
+      for (const input of emojis) wanted.push(await resolveEmoji(rest, guildId, input, guildEmojis));
+
       const added: string[] = [];
-      for (const input of emojis) {
-        const emoji = await resolveEmoji(rest, guildId, input);
-        await rest.put(
-          Routes.channelMessageOwnReaction(
-            target.id,
-            message_id,
-            encodeURIComponent(emoji.api)
-          )
-        );
+      for (const emoji of wanted) {
+        try {
+          await rest.put(
+            Routes.channelMessageOwnReaction(
+              target.id,
+              message_id,
+              encodeURIComponent(emoji.api)
+            )
+          );
+        } catch (err) {
+          // Nothing added yet: the failure stands as it is. Otherwise the
+          // result has to say what did go on.
+          if (added.length === 0) throw err;
+          const reason = err instanceof Error ? err.message : String(err);
+          const untried = wanted.length - added.length - 1;
+          return fail(
+            `Added ${added.join(" ")} to the message, then ${emoji.display} failed: ${reason}.` +
+              (untried > 0 ? ` The ${untried} after it ${untried === 1 ? "was" : "were"} not tried.` : ""),
+            { added, failed: emoji.display }
+          );
+        }
         added.push(emoji.display);
       }
       return ok(
@@ -107,7 +133,7 @@ export function registerReactionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
         emoji: z.string(),
         user: z.string().optional()
           .describe("Whose reaction to remove; omit for the bot's own."),
@@ -129,13 +155,13 @@ export function registerReactionTools(
           requirePermissions(
             perms,
             [[P.ManageMessages, "Manage Messages"]],
-            `in #${target.name}`
+            `in ${channelLabel(target)}`
           );
         }
         await rest.delete(
           Routes.channelMessageUserReaction(target.id, message_id, encoded, member.user.id)
         );
-        return ok(`Removed ${resolved.display} reaction by ${member.user.username}.`, {
+        return ok(`Removed ${resolved.display} reaction by ${quoted(member.user.username)}.`, {
           removed: resolved.display,
           user: member.user.id,
         });
@@ -162,11 +188,11 @@ export function registerReactionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
         emoji: z.string().optional()
           .describe("Only clear this emoji; omit to clear everything."),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -178,7 +204,7 @@ export function registerReactionTools(
       requirePermissions(
         perms,
         [[P.ManageMessages, "Manage Messages"]],
-        `in #${target.name}`
+        `in ${channelLabel(target)}`
       );
 
       const resolved = emoji ? await resolveEmoji(rest, guildId, emoji) : undefined;
@@ -230,7 +256,7 @@ export function registerReactionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
         emoji: z.string(),
         limit: z.number().int().min(1).max(100).optional()
           .describe("Max users. Default 25."),
@@ -251,10 +277,18 @@ export function registerReactionTools(
         { query: new URLSearchParams({ limit: String(limit ?? 25) }) }
       )) as APIUser[];
 
+      // A full page is a floor, not a count: Discord returns at most the
+      // limit, and more people may have reacted.
+      const cap = limit ?? 25;
+      const full = users.length >= cap;
       return ok(
-        `${users.length} user(s) reacted with ${resolved.display}.`,
+        full
+          ? `At least ${users.length} user(s) reacted with ${resolved.display}; these are the first ${users.length}` +
+              (cap < 100 ? ", and a higher limit (up to 100) lists more." : ".")
+          : `${users.length} user(s) reacted with ${resolved.display}.`,
         {
           emoji: resolved.display,
+          more: full,
           users: users.map((u) => ({
             id: u.id,
             name: u.global_name ?? u.username,
@@ -302,7 +336,7 @@ export function registerReactionTools(
       requirePermissions(
         perms,
         [[P.SendMessages, "Send Messages"]],
-        `in #${target.name}`
+        `in ${channelLabel(target)}`
       );
 
       const body: RESTPostAPIChannelMessageJSONBody = {
@@ -322,7 +356,7 @@ export function registerReactionTools(
       })) as APIMessage;
 
       return ok(
-        `Poll posted in #${target.name}: "${question}" with ` +
+        `Poll posted in ${channelLabel(target)}: "${question}" with ` +
           `${answers.length} answers, running ${duration_hours ?? 24} hour(s).`,
         {
           id: sent.id,
@@ -337,15 +371,21 @@ export function registerReactionTools(
     "get_poll_results",
     {
       title: "Get poll results",
-      description: "Current tallies for a poll message.",
+      description:
+        "Current tallies for a poll message. With include_voters, also who " +
+        "voted for each answer.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
+        include_voters: z.boolean().optional()
+          .describe("Also list the people who chose each answer."),
+        voters_per_answer: z.number().int().min(1).max(1000).optional()
+          .describe("How many voters to list per answer when include_voters is on. Default 100."),
       },
       annotations: { readOnlyHint: true },
     },
-    guarded(async ({ channel, guild, message_id }) => {
+    guarded(async ({ channel, guild, message_id, include_voters, voters_per_answer }) => {
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveChannel(rest, guildId, channel, TEXT_BEARING_TYPES);
 
@@ -358,22 +398,57 @@ export function registerReactionTools(
       const counts = new Map(
         (message.poll.results?.answer_counts ?? []).map((c) => [c.id, c.count])
       );
-      const results = message.poll.answers.map((a) => ({
-        text: a.poll_media.text ?? "",
-        votes: counts.get(a.answer_id) ?? 0,
-      }));
+      const cap = voters_per_answer ?? 100;
+      const results = [];
+      let shortLists = 0;
+      for (const a of message.poll.answers) {
+        const votes = counts.get(a.answer_id) ?? 0;
+        if (!include_voters) {
+          results.push({ text: a.poll_media.text ?? "", votes });
+          continue;
+        }
+        // Discord pages voters 100 at a time, oldest user id first.
+        const voters: Array<{ id: string; name: string }> = [];
+        let after: string | undefined;
+        while (votes > 0 && voters.length < cap) {
+          const limit = Math.min(100, cap - voters.length);
+          const page = (await rest.get(
+            Routes.pollAnswerVoters(target.id, message_id, a.answer_id),
+            { query: new URLSearchParams({ limit: String(limit), ...(after ? { after } : {}) }) }
+          )) as { users?: APIUser[] };
+          const users = page.users ?? [];
+          for (const u of users) voters.push({ id: u.id, name: u.global_name ?? u.username });
+          if (users.length < limit) break;
+          after = users[users.length - 1].id;
+        }
+        const unlisted = Math.max(0, votes - voters.length);
+        if (unlisted > 0) shortLists++;
+        results.push({
+          text: a.poll_media.text ?? "",
+          votes,
+          voters,
+          ...(unlisted > 0 ? { voters_not_listed: unlisted } : {}),
+        });
+      }
       const total = results.reduce((sum, r) => sum + r.votes, 0);
       const finalized = message.poll.results?.is_finalized ?? false;
 
       return ok(
-        `Poll "${message.poll.question.text}": ${total} vote(s)` +
+        `Poll ${quoted(message.poll.question.text, 300)}: ${total} vote(s)` +
           (finalized ? ", finished." : ", still open."),
         {
           question: message.poll.question.text,
           finalized,
+          multi_select: message.poll.allow_multiselect,
           expires_at: message.poll.expiry,
           answers: results,
-        }
+        },
+        shortLists > 0
+          ? [
+              `Voters are listed up to ${cap} per answer; raise voters_per_answer ` +
+                "(up to 1000) to see more.",
+            ]
+          : []
       );
     })
   );
@@ -383,15 +458,21 @@ export function registerReactionTools(
     {
       title: "End poll",
       description:
-        "Close one of the bot's own polls early and finalize the results.",
+        "Close one of the bot's own polls early and finalize the results. " +
+        "Voting stops for good, since a poll cannot be reopened. Safe to " +
+        "call directly: the first call changes nothing and returns a " +
+        "preview plus a confirm_token; repeating the call with the token " +
+        "ends the poll. A poll that has already closed is left alone.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string(),
+        message_id: messageIdParam,
+        dry_run: z.boolean().optional(),
+        confirm_token: confirmTokenParam,
       },
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    guarded(async ({ channel, guild, message_id }) => {
+    guarded(async ({ channel, guild, message_id, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveChannel(rest, guildId, channel, TEXT_BEARING_TYPES);
 
@@ -403,12 +484,34 @@ export function registerReactionTools(
       if (message.author.id !== botUser.id) {
         return fail(
           "Only the poll's creator can end it early, and that poll was " +
-            `posted by ${message.author.username}, not the bot.`
+            `posted by ${quoted(message.author.username)}, not the bot.`
         );
       }
 
+      const question = message.poll.question.text;
+      const closes = message.poll.expiry ? new Date(message.poll.expiry).getTime() : undefined;
+      if (message.poll.results?.is_finalized === true || (closes !== undefined && closes <= Date.now())) {
+        return ok(`The poll ${quoted(question, 300)} has already closed. Nothing to do.`, { ended: false, id: message_id });
+      }
+      const votes = (message.poll.results?.answer_counts ?? []).reduce((n, a) => n + a.count, 0);
+      const gate = gateDestructive({
+        tool: "end_poll",
+        args: { channel: target.id, message_id },
+        dryRun: dry_run,
+        confirmToken: confirm_token,
+        previewSummary:
+          `Would end the poll ${quoted(question, 300)} in ${channelLabel(target)} now` +
+          (closes !== undefined ? `, ${describeDuration(Math.round((closes - Date.now()) / 1000))} before it closes on its own` : "") +
+          `, with ${votes} vote(s) in. Voting stops and the results become final; a poll cannot be reopened.`,
+        previewDetails: {
+          channel: { id: target.id, name: target.name },
+          poll: { id: message_id, question, votes, closes_at: message.poll.expiry ?? null },
+        },
+      });
+      if (gate) return gate;
+
       await rest.post(Routes.expirePoll(target.id, message_id));
-      return ok(`Ended the poll "${message.poll.question.text}".`, {
+      return ok(`Ended the poll ${quoted(question, 300)}.`, {
         ended: true,
         id: message_id,
       });

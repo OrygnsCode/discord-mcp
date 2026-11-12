@@ -6,7 +6,7 @@
 // Run with: npm run smoke
 
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,8 +22,8 @@ const entry = join(root, "dist", "index.js");
 // touch the real one.
 const env = { ...process.env };
 env.DISCORD_TOKEN = "";
-env.OMNICORD_GUILD = "";
-env.OMNICORD_DATA_DIR = join(tmpdir(), `omnicord-smoke-${Date.now()}`);
+env.DISCORD_MCP_GUILD = "";
+env.DISCORD_MCP_DATA_DIR = join(tmpdir(), `discord-mcp-smoke-${Date.now()}`);
 
 const child = spawn(process.execPath, [entry], {
   cwd: tmpdir(),
@@ -70,7 +70,7 @@ function request(method, params) {
         pending.delete(id);
         reject(new Error(`Timed out waiting for response to ${method}`));
       }
-    }, 10000);
+    }, 30000);
   });
 }
 
@@ -93,9 +93,18 @@ try {
   const init = await request("initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
-    clientInfo: { name: "omnicord-smoke", version: "0.0.1" },
+    clientInfo: { name: "discord-mcp-smoke", version: "0.0.1" },
   });
-  assert(init.result?.serverInfo?.name === "omnicord", "server identifies as omnicord");
+  assert(init.result?.serverInfo?.name === "discord-mcp", "server identifies as discord-mcp");
+  assert(init.result?.serverInfo?.title === "Discord MCP", "server carries its display title");
+  assert(
+    typeof init.result?.instructions === "string" &&
+      init.result.instructions.startsWith("Discord server management through a bot account.") &&
+      init.result.instructions.includes("confirm_token") &&
+      init.result.instructions.includes("refuses a parameter it does not have before anything runs") &&
+      init.result.instructions.length < 2000,
+    "the server says what it is for before any tool is loaded (instructions)"
+  );
   notify("notifications/initialized", {});
 
   const tools = await request("tools/list", {});
@@ -158,6 +167,53 @@ try {
     (deadSub.result?.content?.[0]?.text ?? "").includes("gateway"),
     "subscribe failure explains the gateway state"
   );
+  // A parameter a tool does not have is answered, not dropped. All of
+  // this is decided before a tool runs, so it needs no token.
+  const callWith = async (name, args) => {
+    const res = await request("tools/call", { name, arguments: args });
+    const text = res.result?.content?.[0]?.text ?? "";
+    let envelope = {};
+    try { envelope = JSON.parse(text); } catch { envelope = { summary: text }; }
+    return { isError: res.result?.isError === true, summary: envelope.summary ?? "", warnings: envelope.warnings ?? [] };
+  };
+  const noDry = await callWith("pin_message", { channel: "general", message_id: "1234567890123456789", dry_run: true });
+  assert(
+    noDry.isError && noDry.summary === "pin_message has no dry run, so this call would have run for real. Nothing was done. Call it again without dry_run to run it.",
+    "dry_run on a tool with no dry run is refused before the tool runs"
+  );
+  const noSuch = await callWith("create_webhook", { channel: "general", name: "x", private: true });
+  assert(
+    noSuch.isError && noSuch.summary === 'create_webhook has no parameter named "private". Nothing was done. Its parameters are: channel, guild, name, avatar_url.',
+    "a tool that changes something refuses a parameter it does not have"
+  );
+  const declaredDry = await callWith("send_message", { channel: "general", content: "x", dry_run: true });
+  assert(declaredDry.isError && /DISCORD_TOKEN/.test(declaredDry.summary), "a tool that has dry_run takes it, and gets as far as needing a token");
+  const hostKeys = await callWith("pin_message", { channel: "general", message_id: "1234567890123456789", sessionId: "s", action: "a", chatInput: "c", toolCallId: "t" });
+  assert(hostKeys.isError && /DISCORD_TOKEN/.test(hostKeys.summary), "the keys n8n adds to every call do not stop a tool");
+  const inside = await callWith("save_blueprint", { name: "smoke-inside", blueprint: { channels: [{ name: "staff-chat", private: true }] } });
+  assert(
+    inside.isError && inside.summary === 'save_blueprint was passed "blueprint.channels[0].private", which it does not read. Nothing was done. Its schema lists what blueprint takes.',
+    "a key a blueprint's channel does not have is refused by its path"
+  );
+  const plannedInside = await callWith("plan_server_build", { blueprint: { channels: [{ name: "staff-chat", private: true }] } });
+  assert(
+    plannedInside.isError && plannedInside.summary === 'plan_server_build was passed "blueprint.channels[0].private", which it does not read. Nothing was done. Its schema lists what blueprint takes.',
+    "the planner refuses it too, read-only though it is, since its plan is what gets built"
+  );
+  const readExtra = await callWith("get_rate_limit_status", { bogus: 1 });
+  assert(
+    !readExtra.isError && readExtra.warnings.length === 1 && readExtra.warnings[0] === 'get_rate_limit_status has no parameter named "bogus", so it was ignored. It takes no parameters.',
+    "a tool that only reads answers and says what it ignored"
+  );
+  const readClean = await callWith("get_rate_limit_status", {});
+  assert(!readClean.isError && readClean.warnings.length === 0, "and says nothing when nothing was extra");
+  const required = await callWith("create_webhook", { private: true });
+  assert(required.isError && /Input validation error/.test(required.summary) && /channel/.test(required.summary), "a missing required parameter is still the first thing said");
+  assert(
+    (tools.result?.tools ?? []).every((t) => t.inputSchema?.type === "object" && !("additionalProperties" in t.inputSchema)),
+    "no tool's published schema changed shape for it"
+  );
+
   const delMeta = (tools.result?.tools ?? []).find((t) => t.name === "delete_message");
   assert(delMeta?.annotations?.destructiveHint === true, "delete_message carries destructiveHint");
 
@@ -237,6 +293,54 @@ try {
     assert(writesInCore.length === 0, `every core tool is read-only${writesInCore.length ? ` (not: ${writesInCore.join(", ")})` : ""}`);
   }
 
+  // The catalog is the contract people read. Every tool has a row, the D
+  // column says how the tool really behaves, each row names every
+  // parameter the tool takes, and a list of accepted values is the real
+  // list. Rows that drifted from the code have claimed confirmations that
+  // did not exist and values no tool accepted.
+  {
+    const catalog = readFileSync(join(root, "docs", "tool-catalog.md"), "utf8").replace(/\r\n/g, "\n");
+    const rows = new Map();
+    for (const line of catalog.split("\n")) {
+      const m = line.match(/^\| ([a-z_]+)\*? \| ([a-z ]+) \| ([^|]*) \| ([^|]*) \| (.*) \|$/);
+      if (m) rows.set(m[1], { d: m[2].trim(), params: m[4], text: `${m[4]} ${m[5]}` });
+    }
+    const problems = [];
+    for (const name of names) if (!rows.has(name)) problems.push(`${name} has no row`);
+    for (const name of rows.keys()) if (!names.includes(name)) problems.push(`${name} has a row but is not a tool`);
+    // Plumbing every row may leave out.
+    const implied = new Set(["confirm_token", "dry_run", "guild", "reason", "bot"]);
+    for (const tool of tools.result?.tools ?? []) {
+      const row = rows.get(tool.name);
+      if (!row) continue;
+      const props = tool.inputSchema?.properties ?? {};
+      // A staged plan is execute_build_plan's preview, so it takes no token.
+      const confirms = "confirm_token" in props || tool.name === "execute_build_plan";
+      const destructive = tool.annotations?.destructiveHint === true;
+      if (!["yes", "no", "grants", "lowers"].includes(row.d)) problems.push(`${tool.name}: unknown D value "${row.d}"`);
+      if (row.d !== "no" && !confirms) problems.push(`${tool.name}: D is ${row.d}, but the tool takes no confirm_token`);
+      if (row.d === "no" && confirms) problems.push(`${tool.name}: D is no, but the tool takes a confirm_token`);
+      if (row.d === "yes" && !destructive) problems.push(`${tool.name}: D is yes, but the tool is not marked destructive`);
+      if (row.d === "no" && destructive) problems.push(`${tool.name}: D is no, but the tool is marked destructive`);
+      for (const [param, schema] of Object.entries(props)) {
+        if (implied.has(param)) continue;
+        if (!new RegExp(`\\b${param}\\b`).test(row.text)) {
+          problems.push(`${tool.name}: ${param} is not in its row`);
+          continue;
+        }
+        const accepted = (schema.enum ?? schema.items?.enum)?.map(String);
+        const listed = row.params.match(new RegExp(`\\b${param}(?:\\[\\])? \\(([^)]*)\\)`))?.[1];
+        if (!accepted || !listed) continue;
+        const values = listed.split(",").map((v) => v.trim());
+        // Prose in the brackets is not a list of values.
+        if (values.length < 2 || !values.every((v) => /^[a-z0-9_]+$/.test(v))) continue;
+        for (const v of values) if (!accepted.includes(v)) problems.push(`${tool.name}: the row lists ${param} "${v}", which the tool does not accept`);
+        for (const v of accepted) if (!values.includes(v)) problems.push(`${tool.name}: the row leaves out ${param} "${v}"`);
+      }
+    }
+    assert(problems.length === 0, `the catalog matches the tools${problems.length ? `:\n     ${problems.join("\n     ")}` : ""}`);
+  }
+
   async function callTool(name, args) {
     const res = await request("tools/call", { name, arguments: args });
     const envelope = JSON.parse(res.result?.content?.[0]?.text ?? "{}");
@@ -280,10 +384,17 @@ try {
   assert((emptied.data?.blueprints ?? []).length === 0, "store is empty after delete");
 
   // The init wizard must exit cleanly on q without touching anything.
+  // Sandboxed like the tests below, so it can never see a real client config
+  // (the wizard looks for old entries before anything else).
+  const quitSandbox = mkdtempSync(join(tmpdir(), "discord-mcp-quit-"));
   const wizard = (await import("node:child_process")).spawn(
     process.execPath,
     [entry, "init"],
-    { cwd: tmpdir(), env, stdio: ["pipe", "pipe", "pipe"] }
+    {
+      cwd: quitSandbox,
+      env: { ...env, HOME: quitSandbox, USERPROFILE: quitSandbox, APPDATA: join(quitSandbox, "roaming"), LOCALAPPDATA: join(quitSandbox, "local") },
+      stdio: ["pipe", "pipe", "pipe"],
+    }
   );
   let wizardOut = "";
   wizard.stdout.on("data", (d) => (wizardOut += d.toString()));
@@ -293,8 +404,13 @@ try {
     setTimeout(() => {
       wizard.kill();
       resolve(-1);
-    }, 8000);
+    }, 30000);
   });
+  try {
+    rmSync(quitSandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {
+    // A leftover temp folder must not mask the result being checked.
+  }
   assert(wizardCode === 0, "init wizard exits cleanly on q");
   assert(wizardOut.includes("cancelled"), "init wizard announces cancellation");
 
@@ -304,13 +420,13 @@ try {
   // valid token. Sandboxed: the config home and every profile folder point
   // into a temp dir, so no real client config can be found or written, and
   // the snippet is printed rather than written anywhere.
-  const sandbox = mkdtempSync(join(tmpdir(), "omnicord-repair-"));
+  const sandbox = mkdtempSync(join(tmpdir(), "discord-mcp-repair-"));
   const omniHome = join(sandbox, "omnihome");
   mkdirSync(omniHome, { recursive: true });
   writeFileSync(join(omniHome, ".env"), "DISCORD_TOKEN=placeholder.not.a.token\n");
   const repairEnv = {
     ...env,
-    OMNICORD_HOME: omniHome,
+    DISCORD_MCP_HOME: omniHome,
     HOME: sandbox,
     USERPROFILE: sandbox,
     APPDATA: join(sandbox, "roaming"),
@@ -342,7 +458,7 @@ try {
   // On a hang, kill and then wait for the real exit: Windows will not delete
   // a folder that a still-dying process has as its working directory.
   const repairCode = await new Promise((resolve) => {
-    const timer = setTimeout(() => repair.kill(), 8000);
+    const timer = setTimeout(() => repair.kill(), 30000);
     repair.on("exit", (code) => {
       clearTimeout(timer);
       resolve(code);
@@ -362,6 +478,96 @@ try {
     "re-registering prints an entry pointing at this copy"
   );
   assert(repairPlain.includes("Two steps left"), "re-registering ends with the restart steps");
+
+  // Upgrading from the pre-2.0 name, end to end in a sandbox: a fake home
+  // with a Claude Desktop config holding the old "omnicord" entry, a Cursor
+  // config holding both the old entry and someone else's server under the
+  // discord-mcp key, and Claude Code's own config with the old entry. The
+  // wizard must switch Desktop (with a backup), ask before touching the
+  // other server, leave Cursor alone when told no, and print the Claude Code
+  // commands. Nothing outside the sandbox can be found or written.
+  const upSandbox = mkdtempSync(join(tmpdir(), "discord-mcp-upgrade-"));
+  const upEnv = {
+    ...env,
+    DISCORD_MCP_HOME: join(upSandbox, "home-config"),
+    HOME: upSandbox,
+    USERPROFILE: upSandbox,
+    APPDATA: join(upSandbox, "roaming"),
+    LOCALAPPDATA: join(upSandbox, "local"),
+  };
+  const desktopPath =
+    process.platform === "win32"
+      ? join(upSandbox, "local", "Claude-Data", "claude_test", "claude_desktop_config.json")
+      : process.platform === "darwin"
+        ? join(upSandbox, "Library", "Application Support", "Claude", "claude_desktop_config.json")
+        : join(upSandbox, ".config", "Claude", "claude_desktop_config.json");
+  const cursorPath = join(upSandbox, ".cursor", "mcp.json");
+  mkdirSync(dirname(desktopPath), { recursive: true });
+  mkdirSync(dirname(cursorPath), { recursive: true });
+  writeFileSync(
+    desktopPath,
+    JSON.stringify({ mcpServers: { omnicord: { command: "node", args: ["old-copy.js"] }, kali: { command: "python" } } })
+  );
+  const cursorBefore = JSON.stringify({
+    mcpServers: {
+      omnicord: { command: "npx", args: ["-y", "@orygn/omnicord"] },
+      "discord-mcp": { command: "npx", args: ["-y", "@discord-mcp/cli"] },
+    },
+  });
+  writeFileSync(cursorPath, cursorBefore);
+  writeFileSync(join(upSandbox, ".claude.json"), JSON.stringify({ mcpServers: { omnicord: { command: "npx" } } }));
+
+  const upgrade = (await import("node:child_process")).spawn(process.execPath, [entry, "setup"], {
+    cwd: upSandbox,
+    env: upEnv,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let upOut = "";
+  let answeredSwitch = false;
+  let answeredForeign = false;
+  upgrade.stdout.on("data", (d) => {
+    upOut += d.toString();
+    const plain = upOut.replace(/\x1b\[[0-9;]*m/g, "");
+    if (!answeredSwitch && /Switch them to this version\? \[Y\/n\]/.test(plain)) {
+      answeredSwitch = true;
+      upgrade.stdin.write("\n");
+    }
+    if (!answeredForeign && /Replace it\? Your current config is backed up first\. \[Y\/n\]/.test(plain)) {
+      answeredForeign = true;
+      upgrade.stdin.write("n\n");
+    }
+  });
+  const upCode = await new Promise((resolve) => {
+    const timer = setTimeout(() => upgrade.kill(), 30000);
+    upgrade.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+  const upPlain = upOut.replace(/\x1b\[[0-9;]*m/g, "");
+  const desktopAfter = JSON.parse(readFileSync(desktopPath, "utf8"));
+  const cursorAfter = readFileSync(cursorPath, "utf8");
+  const backups = readdirSync(dirname(desktopPath)).filter((f) => f.startsWith("claude_desktop_config.json.bak-discord-mcp-"));
+  try {
+    rmSync(upSandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch {
+    // A leftover temp folder must not mask the result being checked.
+  }
+  assert(upCode === 0, "upgrade: the wizard exits cleanly");
+  assert(upPlain.includes("Omnicord is now discord-mcp."), "upgrade: says the name changed, once");
+  assert(answeredSwitch, "upgrade: offers to switch every old entry in one question");
+  assert(
+    desktopAfter.mcpServers["discord-mcp"]?.args?.[0] === entry && !("omnicord" in desktopAfter.mcpServers),
+    "upgrade: Desktop's old entry is replaced by one pointing at this copy"
+  );
+  assert(desktopAfter.mcpServers.kali?.command === "python", "upgrade: other servers in the file survive");
+  assert(backups.length === 1, "upgrade: Desktop's file was backed up first");
+  assert(answeredForeign && upPlain.includes("We're a little biased about which."), "upgrade: asks before replacing someone else's discord-mcp");
+  assert(cursorAfter === cursorBefore, "upgrade: answering no leaves that file exactly as it was");
+  assert(
+    upPlain.includes("claude mcp remove omnicord -s user") && upPlain.includes("claude mcp add discord-mcp -s user -- npx -y @orygn/discord-mcp"),
+    "upgrade: prints the Claude Code commands it cannot run itself"
+  );
 
   console.log("smoke: all assertions passed");
   child.kill();

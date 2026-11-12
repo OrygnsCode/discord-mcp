@@ -1,33 +1,39 @@
 {
-  "name": "@orygn/omnicord",
-  "version": "1.4.1",
-  "description": "Omnicord: a Discord server management MCP for AI agents. Chat, moderate, administrate, and build out entire servers from one brief, through any MCP client.",
+  "name": "@orygn/discord-mcp",
+  "version": "2.0.0",
+  "description": "Discord server management MCP for AI agents: chat, moderation, admin, and full server building. Formerly Omnicord.",
   "type": "module",
-  "license": "Elastic-2.0",
+  "license": "Apache-2.0",
   "author": "Orygn LLC",
-  "homepage": "https://github.com/OrygnsCode/Omnicord#readme",
+  "homepage": "https://github.com/OrygnsCode/discord-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OrygnsCode/Omnicord.git"
+    "url": "git+https://github.com/OrygnsCode/discord-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/OrygnsCode/Omnicord/issues"
+    "url": "https://github.com/OrygnsCode/discord-mcp/issues"
   },
   "keywords": [
     "discord",
+    "discord-mcp",
+    "mcp-discord",
+    "discord-mcp-server",
     "mcp",
     "model-context-protocol",
     "mcp-server",
     "discord-bot",
+    "discord-server",
+    "moderation",
+    "server-builder",
     "ai",
     "claude",
-    "server-builder"
+    "omnicord"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
-    "omnicord": "dist/index.js"
+    "orygn-discord-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
   "files": [
@@ -39,19 +45,20 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
-    "smoke": "npm run build && node scripts/smoke.mjs && node scripts/smoke-http.mjs",
-    "test": "npm run build && node scripts/unit.mjs && node scripts/smoke.mjs && node scripts/smoke-http.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs && node scripts/smoke-modern.mjs && node scripts/smoke-dialog.mjs && node scripts/smoke-http.mjs",
+    "test": "npm run build && node scripts/unit.mjs && node scripts/smoke.mjs && node scripts/smoke-modern.mjs && node scripts/smoke-dialog.mjs && node scripts/smoke-http.mjs",
     "prepublishOnly": "npm test"
   },
   "dependencies": {
     "@discordjs/rest": "^2.6.1",
     "@discordjs/ws": "^2.0.4",
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "discord-api-types": "^0.38.56",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "discord-api-types": "^0.38.58",
     "dotenv": "^17.2.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^24.19.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
@@ -59,5 +66,5 @@
   "overrides": {
     "undici": "^6.29.1"
   },
-  "mcpName": "io.github.OrygnsCode/omnicord"
+  "mcpName": "io.github.OrygnsCode/discord-mcp"
 }

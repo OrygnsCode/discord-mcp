@@ -18,6 +18,14 @@ export interface ActingBot {
 
 interface ActingStore {
   acting?: ActingBot;
+  // The server the call resolved to, with one bot or many. The confirmation
+  // dialog names it so the person agreeing sees where the change lands, and
+  // its id is part of what a confirm token is bound to.
+  server?: string;
+  serverId?: string;
+  // Something the result should say that the tool itself does not know,
+  // such as which of two bots in the server was taken and why.
+  notes?: string[];
 }
 
 const storage = new AsyncLocalStorage<ActingStore>();
@@ -35,4 +43,31 @@ export function setActingBot(acting: ActingBot): void {
 
 export function getActingBot(): ActingBot | undefined {
   return storage.getStore()?.acting;
+}
+
+export function setTargetServer(name: string, id?: string): void {
+  const store = storage.getStore();
+  if (store) {
+    store.server = name;
+    store.serverId = id;
+  }
+}
+
+export function getTargetServerId(): string | undefined {
+  return storage.getStore()?.serverId;
+}
+
+export function getTargetServer(): string | undefined {
+  return storage.getStore()?.server;
+}
+
+export function addResultNote(note: string): void {
+  const store = storage.getStore();
+  if (!store) return;
+  store.notes = store.notes ?? [];
+  if (!store.notes.includes(note)) store.notes.push(note);
+}
+
+export function getResultNotes(): string[] {
+  return storage.getStore()?.notes ?? [];
 }

@@ -1,21 +1,34 @@
 import { DiscordAPIError, type REST } from "@discordjs/rest";
-import { Routes } from "discord-api-types/v10";
+import { quoted } from "../discord/names.js";
+import { Routes, UserFlags } from "discord-api-types/v10";
 import type {
+  APIUser,
   RESTGetAPICurrentUserGuildsResult,
   RESTGetAPIUserResult,
   RESTGetCurrentApplicationResult,
 } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { BotConfig, OmnicordConfig } from "../config.js";
-import { VERSION } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import { join } from "node:path";
+import type { BotConfig, ServerConfig } from "../config.js";
+import { ENVIRONMENT_SOURCE, VERSION, configFolders } from "../config.js";
 import { ok, fail } from "../envelope.js";
 import { enterBot, botParam, ToolProblem } from "./common.js";
+import { describeRateLimit } from "../discord/client.js";
 
 import { readIntents } from "../discord/intents.js";
 import { getGatewayState } from "../discord/gateway.js";
-import { PACKAGE_ROOT } from "../home.js";
+import { PACKAGE_ROOT, defaultHome, legacyHome, readableByOthers, usingLegacyHome } from "../home.js";
 import { npxCacheWarning } from "../install.js";
 import { rateLimitStats } from "../discord/rateLimit.js";
+import { growthChecks } from "../discord/thresholds.js";
+import { SERVER_INFO } from "../identity.js";
+import { LEGACY_PREFIX, PREFIX, legacySettingsInUse, settingSource } from "../settings.js";
+import { RELEASES_URL, UPDATE_COMMAND, availableUpdate } from "../updateCheck.js";
+import { confirmMode, safeModeEnabled, unknownConfirmMode } from "../safety.js";
+import { appCanShowDialog } from "../requestContext.js";
+
+// The gateway state reported for a bot other than the default one.
+const NO_CONNECTION = { status: "off", reason: "only the default bot holds the live connection" } as const;
 
 interface SetupCheck {
   check: string;
@@ -29,7 +42,7 @@ const PORTAL_BOT_PAGE =
 
 export function registerDiagnostics(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "get_rate_limit_status",
@@ -37,7 +50,7 @@ export function registerDiagnostics(
       title: "Get rate limit status",
       description:
         "How rate limiting has been going: how many times Discord asked " +
-        "Omnicord to slow down (the request layer waits automatically), " +
+        "this server to slow down (the request layer waits automatically), " +
         "and the invalid-request counter that matters because Discord " +
         "temporarily bans an IP after 10,000 invalid responses in ten " +
         "minutes. Useful when calls feel slow.",
@@ -63,7 +76,7 @@ export function registerDiagnostics(
       description:
         "Identity and status of a connected Discord bot: bot user, " +
         "application, guild count, enabled gateway intents, and the " +
-        "Omnicord version. With more than one bot configured, pass bot to " +
+        "server version. With more than one bot configured, pass bot to " +
         "pick which (list_servers shows the configured bots). Use " +
         "run_setup_check for a full health check with fix instructions.",
       inputSchema: { bot: botParam },
@@ -106,28 +119,32 @@ export function registerDiagnostics(
 
         return ok(
           `Logged in as ${user.username} (app: ${app.name}). ` +
-            `In ${guildCountDisplay} servers. Intents: ${intentSummary}. ` +
-            `Omnicord v${VERSION}.`,
+            `In ${guildCountDisplay} server${guildCount === 1 ? "" : "s"}. Intents: ${intentSummary}. ` +
+            `discord-mcp v${VERSION}.`,
           {
             bot: {
               id: user.id,
               username: user.username,
               name: selectedBot.name,
+              ...(selectedBot.source ? { token_from: selectedBot.source } : {}),
             },
             application: { id: app.id, name: app.name },
             guilds: {
               count: guildCount,
               capped: guildCount >= 200,
               // First few guilds by id and name. Enough for a human or a
-              // model to grab the right id for OMNICORD_GUILD without a
+              // model to grab the right id for DISCORD_MCP_GUILD without a
               // separate lookup.
               list: guilds
                 .slice(0, 10)
                 .map((g) => ({ id: g.id, name: g.name })),
             },
-            gateway: getGatewayState(),
+            // Only the default bot holds the live connection. Its state
+            // was reported for every bot, so a second bot read as online
+            // and watchable when it is neither.
+            gateway: selectedBot.isDefault ? getGatewayState() : NO_CONNECTION,
             intents,
-            omnicord: { version: VERSION },
+            server: { name: SERVER_INFO.name, version: VERSION },
           }
         );
       } catch (err) {
@@ -141,10 +158,11 @@ export function registerDiagnostics(
     {
       title: "Run setup check",
       description:
-        "End-to-end health check of the Omnicord setup: token presence and " +
-        "validity, privileged gateway intent toggles, guild count against " +
-        "Discord's verification thresholds, default guild membership, and " +
-        "whether this install runs from npm's temporary npx cache. " +
+        "End-to-end health check of the discord-mcp setup: token presence and " +
+        "validity, privileged gateway intent toggles, Discord's growth thresholds " +
+        "(App Verification by servers, intent review by users), default guild membership, whether " +
+        "this install runs from npm's temporary npx cache, how destructive " +
+        "actions get confirmed in this app, and leftovers from before the 2.0 rename. " +
         "Every failed check comes with instructions for fixing it. With more " +
         "than one bot configured, pass bot to check a specific one. Run this " +
         "first when anything misbehaves.",
@@ -165,12 +183,59 @@ export function registerDiagnostics(
           detail:
             `Running from npm's npx cache (${PACKAGE_ROOT}), which npm does ` +
             "not keep. When it is cleared, the AI client fails to start " +
-            'Omnicord and shows "Server disconnected".',
+            'it and shows "Server disconnected".',
           fix:
-            "Run `npx @orygn/omnicord@latest init`, choose \"Re-register " +
+            "Run `npx @orygn/discord-mcp@latest init`, choose \"Re-register " +
             'with your AI client", then fully restart the client.',
         });
       }
+
+      // A newer release, when the daily check has found one.
+      const newer = availableUpdate();
+      if (newer) {
+        checks.push({
+          check: "version",
+          status: "warn",
+          detail: `discord-mcp ${newer} is available; this is ${VERSION}.`,
+          fix:
+            `Run \`${UPDATE_COMMAND}\`, choose "Re-register with your AI client", then fully restart the client. ` +
+            `What changed: ${RELEASES_URL}`,
+        });
+      }
+
+      // Leftovers from before the 2.0 rename. Both keep working through 2.x,
+      // so they are warnings, reported only when present.
+      const legacyNames = legacySettingsInUse();
+      if (legacyNames.length > 0) {
+        const one = legacyNames.length === 1;
+        checks.push({
+          check: "setting_names",
+          status: "warn",
+          detail:
+            `Using the pre-2.0 setting name${one ? "" : "s"} ${legacyNames.join(", ")}. ` +
+            (one
+              ? "It still works through 2.x and stops working in 3.0."
+              : "They still work through 2.x and stop working in 3.0."),
+          fix:
+            "Rename " +
+            legacyNames.map((n) => `${n} to ${n.replace(LEGACY_PREFIX, PREFIX)}`).join(", ") +
+            `, wherever ${one ? "it is" : "they are"} set: the AI client's config (env section) or the .env file.`,
+        });
+      }
+      if (usingLegacyHome()) {
+        checks.push({
+          check: "settings_folder",
+          status: "warn",
+          detail: `Settings are still in ${legacyHome()}, the folder used before 2.0. They work from there.`,
+          fix:
+            "Run `npx @orygn/discord-mcp@latest init` and accept the offer to " +
+            `switch over, which moves them to ${defaultHome()}.`,
+        });
+      }
+
+      // How destructive actions get confirmed in this app. It depends on
+      // the app, not the token, so it comes before check 1.
+      checks.push(confirmationCheck());
 
       // Check 1: a bot is configured.
       if (config.bots.length === 0) {
@@ -179,8 +244,9 @@ export function registerDiagnostics(
           status: "fail",
           detail: "No DISCORD_TOKEN is set.",
           fix:
-            "Set DISCORD_TOKEN in the MCP server config (env section) or in " +
-            "a .env file. Get the token from " +
+            "Run `npx @orygn/discord-mcp init`, or set DISCORD_TOKEN in the MCP " +
+            `server config (env section) or in ${configFolders().map((f) => join(f, ".env")).join(" or ")}. ` +
+            "Get the token from " +
             PORTAL_BOT_PAGE +
             ", Reset Token.",
         });
@@ -194,21 +260,32 @@ export function registerDiagnostics(
         throw err;
       }
       const { rest, bot } = entered;
+      // A token file every account on the machine can read gives the bot to
+      // any of them. Files the wizard writes are private; one made by hand
+      // or by an earlier version may not be.
+      const exposed =
+        bot.source !== undefined && bot.source !== ENVIRONMENT_SOURCE && readableByOthers(bot.source) === true;
       checks.push({
         check: "token_present",
-        status: "pass",
+        status: exposed ? "warn" : "pass",
+        // Where the token came from is said so a bot nobody meant to use
+        // (a token left in some file) is seen for what it is.
         detail:
-          config.bots.length > 1
-            ? `Checking bot "${bot.name}" of ${config.bots.length} configured.`
-            : "DISCORD_TOKEN is set.",
+          (config.bots.length > 1
+            ? `Checking bot ${quoted(bot.name)} of ${config.bots.length} configured.`
+            : "DISCORD_TOKEN is set.") +
+          (bot.source ? ` It comes from ${bot.source}.` : "") +
+          (exposed ? " Other accounts on this machine can read that file, and the token in it is the whole bot." : ""),
+        ...(exposed ? { fix: `Make it readable by you alone: chmod 600 "${bot.source}"` } : {}),
       });
 
       // Check 2: token valid. A 401 from /users/@me means Discord rejected
       // the token itself.
       let app: RESTGetCurrentApplicationResult;
       let guilds: RESTGetAPICurrentUserGuildsResult;
+      let me: APIUser;
       try {
-        await rest.get(Routes.user("@me"));
+        me = (await rest.get(Routes.user("@me"))) as APIUser;
         checks.push({
           check: "token_valid",
           status: "pass",
@@ -218,9 +295,11 @@ export function registerDiagnostics(
           rest.get(
             Routes.currentApplication()
           ) as Promise<RESTGetCurrentApplicationResult>,
-          rest.get(
-            Routes.userGuilds()
-          ) as Promise<RESTGetAPICurrentUserGuildsResult>,
+          // with_counts adds each server's approximate member count, for
+          // the user threshold below.
+          rest.get(Routes.userGuilds(), {
+            query: new URLSearchParams({ with_counts: "true" }),
+          }) as Promise<RESTGetAPICurrentUserGuildsResult>,
         ]);
       } catch (err) {
         if (err instanceof DiscordAPIError && err.status === 401) {
@@ -236,7 +315,18 @@ export function registerDiagnostics(
           });
           return finishChecks(checks);
         }
-        throw err;
+        // Anything else is an answer too: this is the tool people run when
+        // something is wrong, and a dropped connection used to come back as
+        // a bare error with every finding so far thrown away.
+        checks.push({
+          check: "discord_reachable",
+          status: "fail",
+          detail: `Discord could not be asked about the token: ${unreachableReason(err)}.`,
+          fix:
+            "Check this machine's network connection and https://discordstatus.com, " +
+            "then run the check again.",
+        });
+        return finishChecks(checks);
       }
 
       // Check 3: privileged intents. Members and Message Content gate core
@@ -247,7 +337,7 @@ export function registerDiagnostics(
         "Open " +
         PORTAL_BOT_PAGE +
         ", scroll to Privileged Gateway Intents, and turn the toggle on. " +
-        "Under 100 servers this needs no review.";
+        "Below 10,000 users this needs no review.";
       checks.push({
         check: "intent_members",
         status: intents.members ? "pass" : "fail",
@@ -272,36 +362,31 @@ export function registerDiagnostics(
           : "Presence intent is disabled. Fine unless presence features are needed.",
       });
 
-      // Check 4: guild count against Discord's verification thresholds.
-      // Verification applications open at 75 servers and become mandatory
-      // at 100, where unverified bots stop being able to join guilds and
-      // privileged intents require approval.
-      const count = guilds.length;
-      if (count >= 100) {
-        checks.push({
-          check: "guild_count",
-          status: "warn",
-          detail: `Bot is in ${count} servers, at or past the verification gate.`,
-          fix: "Verification and intent approval are required at this size.",
-        });
-      } else if (count >= 75) {
-        checks.push({
-          check: "guild_count",
-          status: "warn",
-          detail: `Bot is in ${count} servers. Verification applications open at 75; the hard gate is 100.`,
-        });
-      } else {
-        checks.push({
-          check: "guild_count",
-          status: "pass",
-          detail: `Bot is in ${count} servers, comfortably under the 100-server verification gate.`,
-        });
-      }
+      // Check 4: Discord's growth thresholds, verification by servers and
+      // privileged intents by users (see thresholds.ts). The guild list
+      // comes back in pages of 200, so a full page means "at least".
+      checks.push(
+        ...growthChecks({
+          serverCount: guilds.length,
+          capped: guilds.length >= 200,
+          verified: ((me.public_flags ?? me.flags ?? 0) & UserFlags.VerifiedBot) !== 0,
+          memberTotal: guilds.reduce((sum, g) => sum + (g.approximate_member_count ?? 0), 0),
+          anyPrivilegedIntent: intents.members || intents.messageContent || intents.presence,
+        })
+      );
 
       // Check 5: the gateway connection, which powers presence and event
       // subscriptions. Not fatal: every REST tool works without it.
-      const gateway = getGatewayState();
-      if (gateway.status === "connected") {
+      const gateway = bot.isDefault ? getGatewayState() : undefined;
+      if (!gateway) {
+        checks.push({
+          check: "gateway",
+          status: "pass",
+          detail:
+            `${quoted(bot.name)} holds no live connection to Discord: only the default bot does. It shows as offline ` +
+            "and its servers cannot be watched with subscribe_events. Every other tool works for it.",
+        });
+      } else if (gateway.status === "connected") {
         checks.push({
           check: "gateway",
           status: "pass",
@@ -324,7 +409,7 @@ export function registerDiagnostics(
           check: "gateway",
           status: "warn",
           detail: `Gateway error: ${gateway.message}. REST tools are unaffected.`,
-          fix: "Restart Omnicord; if it persists, check the token and network.",
+          fix: "Restart your AI app; if it persists, check the token and network.",
         });
       }
 
@@ -341,7 +426,7 @@ export function registerDiagnostics(
             ? {}
             : {
                 fix:
-                  "Invite the bot to that server, or fix OMNICORD_GUILD. " +
+                  `Invite the bot to that server, or fix ${settingSource("GUILD")}. ` +
                   "Build the invite URL in the Developer Portal under " +
                   "OAuth2, URL Generator, with the bot scope.",
               }),
@@ -351,6 +436,54 @@ export function registerDiagnostics(
       return finishChecks(checks);
     }
   );
+}
+
+function confirmationCheck(): SetupCheck {
+  const name = settingSource("CONFIRM");
+  const unknown = unknownConfirmMode();
+  if (unknown !== undefined) {
+    return {
+      check: "confirmations",
+      status: "warn",
+      detail: `${name} is "${unknown}", which is not auto, token, or dialog, so auto applies.`,
+      fix: `Set ${name} to auto, token, or dialog, or remove it.`,
+    };
+  }
+  if (!safeModeEnabled()) {
+    return {
+      check: "confirmations",
+      status: "pass",
+      detail: `Safe mode is off (${settingSource("SAFE_MODE")}=false), so destructive actions run without confirmation.`,
+    };
+  }
+  const mode = confirmMode();
+  const canShow = appCanShowDialog();
+  if (mode === "dialog" && !canShow) {
+    return {
+      check: "confirmations",
+      status: "warn",
+      detail:
+        `${name}=dialog requires a confirmation dialog, and this app has not said it can show one, ` +
+        "so destructive actions are refused here.",
+      fix: `Use an app that supports MCP elicitation, or set ${name}=auto to confirm with a preview token instead.`,
+    };
+  }
+  if (mode !== "token" && canShow) {
+    return {
+      check: "confirmations",
+      status: "pass",
+      detail:
+        "Destructive actions are confirmed in a dialog this app shows the user, which the AI cannot " +
+        `answer for them. If the app closes it unanswered (some do when nobody is there to answer), set ${name}=token.`,
+    };
+  }
+  return {
+    check: "confirmations",
+    status: "pass",
+    detail:
+      "Destructive actions are confirmed with a token from a preview, which the AI relays to the user" +
+      (mode === "token" ? ` (${name}=token).` : "; this app has not said it can show a confirmation dialog."),
+  };
 }
 
 function finishChecks(checks: SetupCheck[]) {
@@ -387,5 +520,19 @@ function describeRestError(err: unknown) {
       discord_error: { code: err.code, status: err.status },
     });
   }
-  throw err;
+  return fail(
+    `Could not reach Discord: ${unreachableReason(err)}. Check this machine's network ` +
+      "connection and https://discordstatus.com, then try again.",
+    { network_error: true }
+  );
+}
+
+// Why a request did not get an answer from Discord, in a few words.
+function unreachableReason(err: unknown): string {
+  const limited = describeRateLimit(err);
+  if (limited) return limited.replace(/\.$/, "");
+  if (err instanceof DiscordAPIError) return `Discord answered ${err.status} (${err.message})`;
+  const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+  const text = err instanceof Error ? err.message : String(err);
+  return cause?.code ? `${text} (${cause.code})` : text;
 }

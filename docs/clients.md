@@ -1,13 +1,13 @@
 # Connecting AI clients
 
-Omnicord speaks the Model Context Protocol, so it works with any MCP
+discord-mcp speaks the Model Context Protocol, so it works with any MCP
 client. This guide gives the exact configuration for the common ones. The
 setup wizard writes most of these for you; this is the reference for doing
 it by hand or for clients the wizard does not detect.
 
 There are two transports:
 
-- stdio, where the client launches Omnicord as a local process. This is the
+- stdio, where the client launches discord-mcp as a local process. This is the
   default and what the configurations below use.
 - Streamable HTTP, for clients that connect to a running server over the
   network, including remote and hosted setups. See
@@ -15,9 +15,9 @@ There are two transports:
 
 In every stdio configuration, replace the path with the absolute path to
 your built `dist/index.js`, or use the npx form (no clone needed). No
-token goes in the client configuration; Omnicord reads it from its `.env`
-file: next to the package for a source checkout, or `.omnicord/.env` in
-your user folder for an npx or global install, or from `OMNICORD_HOME` if
+token goes in the client configuration; discord-mcp reads it from its `.env`
+file: next to the package for a source checkout, or `.orygn/discord-mcp/.env` in
+your user folder for an npx or global install, or from `DISCORD_MCP_HOME` if
 you set it. Multiple bots are configured in a `bots.json` in the same
 directory; see [Multiple bots](multi-bot.md).
 
@@ -28,7 +28,7 @@ From source:
 ```json
 {
   "command": "node",
-  "args": ["/absolute/path/to/Omnicord/dist/index.js"]
+  "args": ["/absolute/path/to/discord-mcp/dist/index.js"]
 }
 ```
 
@@ -37,34 +37,41 @@ From npm:
 ```json
 {
   "command": "npx",
-  "args": ["-y", "@orygn/omnicord"]
+  "args": ["-y", "@orygn/discord-mcp"]
 }
 ```
 
 ## Claude Desktop
 
-Edit `claude_desktop_config.json`. Its location depends on the install:
+Edit `claude_desktop_config.json`. Claude Desktop opens the right file for
+you under Settings, Developer, Edit Config. Its location depends on the
+install:
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows (standard): `%APPDATA%\Claude\claude_desktop_config.json`
-- Windows (Microsoft Store build): under
+- Windows, current builds:
+  `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`
+- Windows, older builds: `%APPDATA%\Claude\claude_desktop_config.json`, or for
+  the Microsoft Store build
   `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
-Add omnicord to the mcpServers object, leaving any existing servers in
+When Desktop moves its data to the new location, the old folder stays behind
+with no config in it. A file created there is never read.
+
+Add discord-mcp to the mcpServers object, leaving any existing servers in
 place:
 
 ```json
 {
   "mcpServers": {
-    "omnicord": {
+    "discord-mcp": {
       "command": "node",
-      "args": ["/absolute/path/to/Omnicord/dist/index.js"]
+      "args": ["/absolute/path/to/discord-mcp/dist/index.js"]
     }
   }
 }
 ```
 
-Fully quit Claude Desktop from the system tray and reopen it. Omnicord
+Fully quit Claude Desktop from the system tray and reopen it. discord-mcp
 appears under Settings, Developer.
 
 ## Claude Code
@@ -75,9 +82,9 @@ who opens it):
 ```json
 {
   "mcpServers": {
-    "omnicord": {
+    "discord-mcp": {
       "command": "node",
-      "args": ["/absolute/path/to/Omnicord/dist/index.js"]
+      "args": ["/absolute/path/to/discord-mcp/dist/index.js"]
     }
   }
 }
@@ -86,7 +93,7 @@ who opens it):
 Or use the CLI if it is on your path:
 
 ```
-claude mcp add omnicord -- node /absolute/path/to/Omnicord/dist/index.js
+claude mcp add discord-mcp -- node /absolute/path/to/discord-mcp/dist/index.js
 ```
 
 A new session in that directory prompts to approve the server.
@@ -103,7 +110,7 @@ Edit `~/.codeium/windsurf/mcp_config.json`, same shape.
 ## ChatGPT and other remote-only clients
 
 Clients that only connect to remote MCP servers (over HTTP) cannot launch a
-local process. For these, run Omnicord in HTTP mode and point the client at
+local process. For these, run discord-mcp in HTTP mode and point the client at
 its URL with the bearer token. See [self-hosting.md](self-hosting.md) for
 running the HTTP transport with authentication.
 
@@ -111,7 +118,7 @@ running the HTTP transport with authentication.
 
 If your client is not listed, it still works. It needs to either:
 
-- launch `node /absolute/path/to/Omnicord/dist/index.js` over stdio, using
+- launch `node /absolute/path/to/discord-mcp/dist/index.js` over stdio, using
   whatever configuration format the client documents, or
 - connect to a running HTTP instance.
 

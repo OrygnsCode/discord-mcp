@@ -1,13 +1,13 @@
 # Toolsets
 
-Omnicord ships 155 tools. Every one of them is described to your AI client
+discord-mcp ships 164 tools. Every one of them is described to your AI client
 before you type anything, which costs context on every request and gives the
 model more options to choose between than most sessions need. The full set is
-about 130 KB of JSON, roughly 33,000 tokens.
+about 188 KB of JSON, roughly 47,000 tokens.
 
-`OMNICORD_TOOLS` narrows that to the groups you actually use.
+`DISCORD_MCP_TOOLS` narrows that to the groups you actually use.
 
-This is optional. Leave the variable unset and all 155 tools load, exactly as
+This is optional. Leave the variable unset and all 164 tools load, exactly as
 they always have.
 
 ## Using it
@@ -15,7 +15,7 @@ they always have.
 Set the variable to a comma separated list of group names:
 
 ```
-OMNICORD_TOOLS=messaging,moderation
+DISCORD_MCP_TOOLS=messaging,moderation
 ```
 
 In a client configuration:
@@ -23,16 +23,18 @@ In a client configuration:
 ```json
 {
   "mcpServers": {
-    "omnicord": {
+    "discord-mcp": {
       "command": "npx",
-      "args": ["-y", "@orygn/omnicord"],
-      "env": { "OMNICORD_TOOLS": "messaging,moderation" }
+      "args": ["-y", "@orygn/discord-mcp"],
+      "env": { "DISCORD_MCP_TOOLS": "messaging,moderation" }
     }
   }
 }
 ```
 
 Restart the client afterwards. The tool list is read when the session starts.
+The setup wizard keeps this `env` block when it re-registers or updates the
+entry.
 
 ## The groups
 
@@ -45,15 +47,15 @@ selected, minus the payload of `core` alone.
 
 | Group | Tools | Size | What it covers |
 |---|---|---|---|
-| `core` | 14 | 9.8 KB | Always on. Diagnostics, setup check, server and channel and role listings, message and member search, `find`. |
-| `messaging` | 21 | 23.2 KB | Sending, editing, replies, DMs, reactions, polls, pins, scheduled messages. |
-| `moderation` | 17 | 14.7 KB | Bans, kicks, timeouts, prune, the audit log, raid actions, AutoMod rules. |
-| `structure` | 23 | 18.8 KB | Channels, roles, and permission overwrites, including locking and cloning. |
-| `builder` | 10 | 14.6 KB | Planning a server from a brief, executing plans, blueprints and diffs. |
-| `threads` | 8 | 5.3 KB | Threads and their members. |
-| `forums` | 8 | 5.8 KB | Forum posts, replies, and tags. |
-| `community` | 31 | 20.0 KB | Invites, webhooks, events, stages, emojis, stickers, soundboard. |
-| `server` | 19 | 14.9 KB | Server settings, widget, welcome screen, onboarding, templates, bot presence, slash commands. |
+| `core` | 15 | 11.6 KB | Always on. Diagnostics, setup check, server and channel and role listings, message and member search, `find`, `catch_up`. |
+| `messaging` | 21 | 29.2 KB | Sending (with files), editing, replies, DMs, reactions, polls, pins, scheduled messages. |
+| `moderation` | 17 | 17.9 KB | Bans, kicks, timeouts, prune, the audit log, raid actions, AutoMod rules. |
+| `structure` | 28 | 33.1 KB | Channels, roles, and permission overwrites, including locking and cloning, undoing any recorded change, and the security review with its who-can-reach views. |
+| `builder` | 11 | 31.0 KB | Planning a server from a brief or a template link, editing an existing one, executing plans, blueprints and diffs. |
+| `threads` | 8 | 5.6 KB | Threads and their members. |
+| `forums` | 8 | 8.1 KB | Forum posts, replies, and tags. |
+| `community` | 31 | 24.0 KB | Invites, webhooks, events, stages, emojis, stickers, soundboard. |
+| `server` | 21 | 20.7 KB | Server settings, widget, welcome screen, onboarding, templates, the bot's presence and profile, leaving a server, slash commands. |
 | `realtime` | 4 | 2.6 KB | Live gateway event subscriptions. |
 
 ## What it saves
@@ -63,19 +65,20 @@ bytes each:
 
 | Setting | Tools | Payload | Tokens | Saved |
 |---|---|---|---|---|
-| unset (everything) | 155 | 132,938 B | ~33,200 | |
-| `core` only | 14 | 10,077 B | ~2,500 | 92% |
-| `messaging` | 35 | 33,849 B | ~8,500 | 75% |
-| `builder` | 24 | 25,012 B | ~6,300 | 81% |
-| `messaging,moderation` | 52 | 48,950 B | ~12,200 | 63% |
-| `messaging,moderation,structure` | 75 | 68,211 B | ~17,100 | 49% |
+| unset (everything) | 164 | 188,326 B | ~47,100 | |
+| `core` only | 15 | 11,858 B | ~3,000 | 94% |
+| `messaging` | 36 | 41,808 B | ~10,500 | 78% |
+| `builder` | 26 | 43,603 B | ~10,900 | 77% |
+| `messaging,moderation` | 53 | 60,157 B | ~15,000 | 68% |
+| `messaging,moderation,structure` | 81 | 94,041 B | ~23,500 | 50% |
 
 ## Choosing a set
 
 - **Running a community day to day**: `messaging,moderation`.
 - **Building or restructuring a server**: `builder,structure`.
 - **A bot that only posts**: `messaging`.
-- **Read only, for reporting or auditing**: `core` on its own.
+- **Read only, for reporting**: `core` on its own. The security review is in
+  `structure`.
 - **Not sure**: leave it unset. Nothing breaks; you carry the whole surface.
 
 Groups are assigned per tool, not per source file, so a group holds what you
@@ -83,7 +86,7 @@ would expect it to hold rather than mirroring the code layout.
 
 ## If you get the name wrong
 
-Omnicord refuses to start and tells you which name it did not recognise, along
+discord-mcp refuses to start and tells you which name it did not recognise, along
 with the full list of valid groups. It does not quietly load a smaller set,
 because tools disappearing without explanation is much harder to debug than a
 server that will not boot.
@@ -92,7 +95,7 @@ In stdio mode the startup line on stderr also names the active groups, so you
 can confirm what a session loaded:
 
 ```
-omnicord v1.4.1 on stdio (toolsets: core, messaging, moderation)
+discord-mcp v2.0.0 on stdio (toolsets: core, messaging, moderation)
 ```
 
 ## Adding a tool

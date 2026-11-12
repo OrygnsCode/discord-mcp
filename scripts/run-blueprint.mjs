@@ -1,12 +1,15 @@
 // Stages and executes a blueprint file against the configured server, with
-// no cleanup. A dev utility for demos and manual testing.
+// no cleanup. A dev utility for demos and manual testing. It builds for
+// real, so it runs only against a known test server, or one named with
+// --server=<id> (see guard.mjs).
 //
-// Usage: node scripts/run-blueprint.mjs examples/dark-fantasy.json
+// Usage: node scripts/run-blueprint.mjs examples/dark-fantasy.json [--server=<id>]
 
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { requireNamedServer } from "./guard.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const blueprintPath = process.argv[2];
@@ -15,6 +18,7 @@ if (!blueprintPath) {
   process.exit(1);
 }
 const blueprint = JSON.parse(readFileSync(blueprintPath, "utf8"));
+await requireNamedServer(process.argv.slice(3), "build this blueprint");
 
 const child = spawn(process.execPath, [join(root, "dist", "index.js")], {
   cwd: root,
@@ -63,7 +67,7 @@ async function callTool(name, args) {
 await request("initialize", {
   protocolVersion: "2025-06-18",
   capabilities: {},
-  clientInfo: { name: "omnicord-blueprint-runner", version: "0.0.1" },
+  clientInfo: { name: "discord-mcp-blueprint-runner", version: "0.0.1" },
 });
 child.stdin.write(
   JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n"

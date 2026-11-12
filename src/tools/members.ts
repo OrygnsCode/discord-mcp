@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIGuildMember, APIRole } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
-import { getRoles, getBotUser, getChannels } from "../discord/guildData.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
+import { getRoles, getBotUser } from "../discord/guildData.js";
 import {
   computeGuildPermissions,
   computeChannelPermissions,
@@ -14,15 +14,22 @@ import {
 import { voiceMembersIn, hasGuildVoiceData } from "../discord/voiceState.js";
 import { resolveOne } from "../discord/resolve.js";
 import { ok, fail } from "../envelope.js";
+import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import { channelLabel, grantLines, grantPhrase, grantsBetween, grantsKey, hasGrants, permissionsIn } from "../discord/grants.js";
+import { CONFIRM_STEPS, hiddenNote, loadScene } from "./grantGate.js";
+import { changeData, recordChange, undoNote } from "./changes.js";
 import {
   enter,
   guarded,
   guildParam,
   resolveChannel,
+  discordMemberPermissions,
   resolveMember,
   memberDisplayName,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // Member administration: nickname and voice state edits, removing a role,
@@ -32,7 +39,7 @@ const P = PermissionFlagsBits;
 
 export function registerMemberTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "update_member",
@@ -42,7 +49,13 @@ export function registerMemberTools(
         "Edit a member's nickname or voice state. Voice changes (server " +
         "mute, server deafen, move to another voice channel) only apply " +
         "while the member is connected to voice. Role changes go through " +
-        "assign_role and remove_role.",
+        "assign_role and remove_role. Moving someone into a voice channel " +
+        "they cannot join themselves lets them hear it, and lifting a server " +
+        "mute or deafen undoes what a moderator did, so those need " +
+        "confirming: the first call changes nothing and returns a preview " +
+        "and a confirm_token, and repeating the call with the token makes " +
+        "the change. Everything else, muting and deafening included, " +
+        "happens at once.",
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
@@ -53,6 +66,7 @@ export function registerMemberTools(
         move_to_voice: z.string().optional()
           .describe("Voice channel name or ID to move the member into."),
         reason: z.string().max(400).optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -64,6 +78,7 @@ export function registerMemberTools(
       server_deafen,
       move_to_voice,
       reason,
+      confirm_token,
     }) => {
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveMember(rest, guildId, member);
@@ -93,7 +108,7 @@ export function registerMemberTools(
         );
         await rest.patch(Routes.guildMember(guildId, "@me"), {
           body: { nick: nickname },
-          reason: reason ?? "Updated via Omnicord",
+          reason: reason ?? "Updated via discord-mcp",
         });
         return ok(
           `Updated the bot's nickname` +
@@ -111,7 +126,7 @@ export function registerMemberTools(
       if (nickname !== undefined) {
         requirePermissions(perms, [[P.ManageNicknames, "Manage Nicknames"]], "in this server");
         body.nick = nickname;
-        changes.push(nickname === "" ? "nickname cleared" : `nickname to "${nickname}"`);
+        changes.push(nickname === "" ? "nickname cleared" : `nickname to ${quoted(nickname)}`);
       }
       if (server_mute !== undefined) {
         requirePermissions(perms, [[P.MuteMembers, "Mute Members"]], "in this server");
@@ -123,18 +138,67 @@ export function registerMemberTools(
         body.deaf = server_deafen;
         changes.push(server_deafen ? "server deafened" : "server undeafened");
       }
+      // What waits for the user, each with the change it accounts for.
+      const who = quoted(memberDisplayName(target));
+      const asks: Array<{ says: string; change: string }> = [];
+      let movedInto: { id: string; name?: string | null } | undefined;
       if (move_to_voice !== undefined) {
         requirePermissions(perms, [[P.MoveMembers, "Move Members"]], "in this server");
         const channel = await resolveChannel(rest, guildId, move_to_voice, [2, 13]);
         body.channel_id = channel.id;
-        changes.push(`moved to ${channel.name}`);
+        movedInto = channel;
+        const change = `moved to ${quoted(channel.name)}`;
+        changes.push(change);
+
+        // The bot can move someone into a channel they could not join on
+        // their own; there they hear and see what goes on.
+        const scene = await loadScene(rest, guildId, { owner: true });
+        const theirs = permissionsIn(scene, { memberId: target.user.id, roleIds: target.roles }, channel);
+        if ((theirs & P.Connect) === 0n) {
+          asks.push({
+            says: `move ${who} into ${channelLabel(channel)}, which they cannot join themselves, so they would hear what is said there`,
+            change,
+          });
+        }
+      }
+      // A server mute or deafen is something a moderator put on the member.
+      // Putting one on happens at once; taking one off is the moderator's
+      // decision undone, like lifting a timeout.
+      if (server_mute === false && target.mute === true) {
+        asks.push({ says: `lift the server mute on ${asks.length ? "them" : who}, so they can speak in voice again`, change: "server unmuted" });
+      }
+      if (server_deafen === false && target.deaf === true) {
+        asks.push({ says: `lift the server deafen on ${asks.length ? "them" : who}, so they can hear voice again`, change: "server undeafened" });
+      }
+      if (asks.length > 0) {
+        const others = changes.filter((c) => !asks.some((a) => a.change === c));
+        const gate = gateDestructive({
+          tool: "update_member",
+          args: {
+            member: target.user.id,
+            channel: movedInto?.id ?? null,
+            nickname: nickname ?? null,
+            server_mute: server_mute ?? null,
+            server_deafen: server_deafen ?? null,
+          },
+          confirmToken: confirm_token,
+          previewSummary:
+            `Would ${asks.map((a) => a.says).join(", and ")}` +
+            (others.length > 0 ? `, and make these changes too: ${others.join(", ")}.` : "."),
+          previewDetails: {
+            member: { id: target.user.id, name: memberDisplayName(target) },
+            ...(movedInto ? { channel: { id: movedInto.id, name: movedInto.name } } : {}),
+            changes,
+          },
+        });
+        if (gate) return gate;
       }
 
       await rest.patch(Routes.guildMember(guildId, target.user.id), {
         body,
-        reason: reason ?? "Updated via Omnicord",
+        reason: reason ?? "Updated via discord-mcp",
       });
-      return ok(`Updated ${memberDisplayName(target)}: ${changes.join(", ")}.`, {
+      return ok(`Updated ${quoted(memberDisplayName(target))}: ${changes.join(", ")}.`, {
         member: { id: target.user.id, name: memberDisplayName(target) },
         changed: changes,
       });
@@ -165,9 +229,9 @@ export function registerMemberTools(
 
       await rest.patch(Routes.guildMember(guildId, target.user.id), {
         body: { channel_id: null },
-        reason: reason ?? "Disconnected via Omnicord",
+        reason: reason ?? "Disconnected via discord-mcp",
       });
-      return ok(`Disconnected ${memberDisplayName(target)} from voice.`, {
+      return ok(`Disconnected ${quoted(memberDisplayName(target))} from voice.`, {
         member: { id: target.user.id, name: memberDisplayName(target) },
       });
     })
@@ -180,7 +244,7 @@ export function registerMemberTools(
       description:
         "Who is currently in a voice or stage channel, with their mute " +
         "and deafen state. This reads the live voice presence the gateway " +
-        "tracks, so it reflects the time since Omnicord connected.",
+        "tracks, so it reflects the time since this server connected.",
       inputSchema: {
         channel: z.string().describe("Voice or stage channel name or ID."),
         guild: guildParam,
@@ -201,7 +265,7 @@ export function registerMemberTools(
 
       const members = voiceMembersIn(guildId, target.id);
       return ok(
-        `${members.length} member(s) in ${target.name}.`,
+        `${members.length} member(s) in ${channelLabel(target)}.`,
         {
           channel: { id: target.id, name: target.name },
           members: members.map((m) => ({
@@ -222,16 +286,21 @@ export function registerMemberTools(
       title: "Remove role",
       description:
         "Take a role away from a member. Preflights the bot's role " +
-        "hierarchy so a failure is an explanation, not a 403.",
+        "hierarchy so a failure is an explanation, not a 403. Usually done at " +
+        "once. A role can also hold someone back (one that hides channels " +
+        "from whoever has it, such as a quarantine role); taking that away " +
+        `lets them in, so it needs confirming: ${CONFIRM_STEPS}.`,
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         role: z.string().describe("Role name or ID."),
         guild: guildParam,
         reason: z.string().max(400).optional(),
+        dry_run: z.boolean().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ member, role, guild, reason }) => {
+    guarded(async ({ member, role, guild, reason, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       const [target, roles, botUser] = await Promise.all([
         resolveMember(rest, guildId, member),
@@ -252,13 +321,13 @@ export function registerMemberTools(
       const targetRole = roles.find((r) => r.id === resolution.match.id) as APIRole;
       if (!target.roles.includes(targetRole.id)) {
         return ok(
-          `${memberDisplayName(target)} does not have ${targetRole.name}. ` +
+          `${quoted(memberDisplayName(target))} does not have ${quoted(targetRole.name)}. ` +
             "Nothing to do.",
           { already_absent: true }
         );
       }
       if (targetRole.managed) {
-        return fail(`${targetRole.name} is integration-managed and cannot be removed manually.`);
+        return fail(`${quoted(targetRole.name)} is integration-managed and cannot be removed manually.`);
       }
 
       const botMember = (await rest.get(
@@ -271,7 +340,7 @@ export function registerMemberTools(
       if (targetRole.position > botTop) {
         return fail(
           `The bot's highest role (position ${botTop}) is below ` +
-            `${targetRole.name} (position ${targetRole.position}). Discord ` +
+            `${quoted(targetRole.name)} (position ${targetRole.position}). Discord ` +
             "will reject this. Move the bot's role higher."
         );
       }
@@ -282,17 +351,65 @@ export function registerMemberTools(
         );
       }
 
+      // A role can deny as well as allow. Without it, the member may see
+      // channels the role hid from them, or regain a power it took away.
+      const scene = await loadScene(rest, guildId, { owner: true });
+      const grants = grantsBetween(
+        { scene, holder: { memberId: target.user.id, roleIds: target.roles } },
+        { scene, holder: { memberId: target.user.id, roleIds: target.roles.filter((id) => id !== targetRole.id) } }
+      );
+      if (hasGrants(grants)) {
+        const hidden = hiddenNote(rest, guildId, scene);
+        const gate = gateDestructive({
+          tool: "remove_role",
+          args: { member: target.user.id, role: targetRole.id, grants: grantsKey(grants) },
+          dryRun: dry_run,
+          confirmToken: confirm_token,
+          previewSummary:
+            `Would take the role ${quoted(targetRole.name)} from ${quoted(memberDisplayName(target))}. ` +
+            `That role holds them back: without it they can ${grantPhrase(grants)}.`,
+          ...(hidden ? { note: hidden } : {}),
+          dialogLines: grantLines(grants),
+          previewDetails: {
+            member: { id: target.user.id, name: memberDisplayName(target) },
+            role: { id: targetRole.id, name: targetRole.name },
+            grants: grantLines(grants),
+          },
+        });
+        if (gate) return gate;
+      } else if (dry_run) {
+        return ok(
+          `Dry run: would take ${quoted(targetRole.name)} from ${quoted(memberDisplayName(target))}. Nothing was changed.`,
+          { executed: false },
+          warnings
+        );
+      }
+
+      const hadIt = target.roles.includes(targetRole.id);
       await rest.delete(
         Routes.guildMemberRole(guildId, target.user.id, targetRole.id),
-        { reason: reason ?? "Removed via Omnicord" }
+        { reason: reason ?? "Removed via discord-mcp" }
       );
+      const recorded = hadIt
+        ? await recordChange(rest, guildId, "remove_role", [
+            {
+              op: "member_role",
+              change: "removed",
+              member: target.user.id,
+              memberName: memberDisplayName(target),
+              role: targetRole.id,
+              name: targetRole.name,
+            },
+          ])
+        : {};
       return ok(
-        `Removed ${targetRole.name} from ${memberDisplayName(target)}.`,
+        `Removed ${quoted(targetRole.name)} from ${quoted(memberDisplayName(target))}.` + undoNote(recorded),
         {
           member: { id: target.user.id, name: memberDisplayName(target) },
           role: { id: targetRole.id, name: targetRole.name },
+          ...changeData(recorded),
         },
-        warnings
+        [...warnings, ...("warning" in recorded && recorded.warning ? [recorded.warning] : [])]
       );
     })
   );
@@ -304,7 +421,8 @@ export function registerMemberTools(
       description:
         "The effective permissions a member has, server-wide or in a " +
         "specific channel once role and overwrite resolution is applied, " +
-        "in plain language.",
+        "in plain language. Uses Discord's own permission check when Discord " +
+        "gives one, which includes its implicit rules; source says which.",
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
@@ -315,32 +433,42 @@ export function registerMemberTools(
     },
     guarded(async ({ member, guild, channel }) => {
       const { rest, guildId } = await enter(config, guild);
-      const [target, roles] = await Promise.all([
+      const [target, roles, guildData] = await Promise.all([
         resolveMember(rest, guildId, member),
         getRoles(rest, guildId),
+        rest.get(Routes.guild(guildId)) as Promise<{ owner_id?: string }>,
       ]);
       if (!target.user) return fail(`Could not load member "${member}".`);
 
-      let bits: bigint;
+      let local: bigint;
       let scope: string;
+      let channelId: string | undefined;
       if (channel) {
         const ch = await resolveChannel(rest, guildId, channel);
-        bits = computeChannelPermissions(
+        local = computeChannelPermissions(
           target.user.id,
           target.roles,
           guildId,
           roles,
           ch.permission_overwrites ?? []
         );
-        scope = `in #${ch.name}`;
+        scope = `in ${channelLabel(ch)}`;
+        channelId = ch.id;
       } else {
-        bits = computeGuildPermissions(target.roles, guildId, roles);
+        local = computeGuildPermissions(target.roles, guildId, roles);
         scope = "server-wide";
       }
+      // The owner has every permission whatever their roles say, which the
+      // calculation from roles does not know.
+      if (guildData.owner_id === target.user.id) local = ALL_PERMISSIONS;
 
-      const isAdmin = bits === ALL_PERMISSIONS;
+      // Discord's own answer when it gives one; the local calculation is
+      // the fallback (see discordMemberPermissions).
+      const fromDiscord = await discordMemberPermissions(rest, guildId, target.user.id, channelId);
+      const bits = fromDiscord ?? local;
+      const isAdmin = (bits & P.Administrator) !== 0n || bits === ALL_PERMISSIONS;
       return ok(
-        `${memberDisplayName(target)} ${scope}: ` +
+        `${quoted(memberDisplayName(target))} ${scope}: ` +
           (isAdmin
             ? "administrator (every permission)."
             : `${describePermissions(bits).length} permission(s).`),
@@ -349,6 +477,7 @@ export function registerMemberTools(
           scope,
           administrator: isAdmin,
           permissions: describePermissions(bits),
+          source: fromDiscord !== undefined ? "discord" : "local calculation",
         }
       );
     })

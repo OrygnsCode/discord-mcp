@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with Omnicord
+description: Report a problem with discord-mcp
 title: '[Bug] '
 labels: ['bug', 'triage']
 body:
@@ -63,9 +63,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: Omnicord version
-      description: Shown by get_bot_info, or run `npm ls @orygn/omnicord`.
-      placeholder: '1.4.1'
+      label: discord-mcp version
+      description: Shown by get_bot_info, or run `npm ls @orygn/discord-mcp`.
+      placeholder: '2.0.0'
     validations:
       required: true
 
@@ -99,10 +99,10 @@ body:
     id: safe-mode
     attributes:
       label: Safe mode
-      description: Default is on. Only set OMNICORD_SAFE_MODE=false for trusted automation.
+      description: Default is on. Only set DISCORD_MCP_SAFE_MODE=false for trusted automation.
       options:
         - 'On (default)'
-        - 'Off (OMNICORD_SAFE_MODE=false)'
+        - 'Off (DISCORD_MCP_SAFE_MODE=false)'
     validations:
       required: true
 

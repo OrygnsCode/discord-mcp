@@ -1,3 +1,4 @@
+import { plainText, quoted } from "../discord/names.js";
 import { z } from "zod";
 import { Routes, ApplicationCommandOptionType } from "discord-api-types/v10";
 import type {
@@ -6,11 +7,11 @@ import type {
   RESTGetCurrentApplicationResult,
 } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { gateDestructive } from "../safety.js";
 import { ok, fail } from "../envelope.js";
-import { enter, enterBot, guarded, guildParam, botParam, ToolProblem } from "./common.js";
+import { enter, enterBot, guarded, guildParam, botParam, ToolProblem, confirmTokenParam } from "./common.js";
 
 // Slash commands belong to the Discord application, not to a server, so these
 // tools authorise on owning the application rather than on a guild permission.
@@ -95,7 +96,7 @@ async function applicationId(rest: REST): Promise<string> {
 // Where a command lives. Passing a guild routes through the normal guild
 // resolution, so the bot that is actually in that server does the work.
 async function scope(
-  config: OmnicordConfig,
+  config: ServerConfig,
   guild: string | undefined,
   bot: string | undefined
 ): Promise<{ rest: REST; guildId?: string; where: string }> {
@@ -131,7 +132,7 @@ async function resolveCommand(
     all.find((c) => c.id === wanted) ??
     all.find((c) => c.name.toLowerCase() === needle);
   if (!found) {
-    const names = all.map((c) => `/${c.name}`).join(", ") || "none";
+    const names = all.map((c) => `/${plainText(c.name)}`).join(", ") || "none";
     throw new ToolProblem(
       fail(
         `No ${guildId ? "guild" : "global"} command matches "${wanted}". ` +
@@ -142,7 +143,7 @@ async function resolveCommand(
   return found;
 }
 
-export function registerAppCommandTools(server: McpServer, config: OmnicordConfig) {
+export function registerAppCommandTools(server: McpServer, config: ServerConfig) {
   server.registerTool(
     "list_app_commands",
     {
@@ -164,8 +165,8 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
       return ok(
         all.length
           ? `${all.length} command${all.length === 1 ? "" : "s"} registered ` +
-              `${guildId ? `in ${where}` : "globally"}.`
-          : `No commands registered ${guildId ? `in ${where}` : "globally"}.`,
+              `${guildId ? `in ${quoted(where)}` : "globally"}.`
+          : `No commands registered ${guildId ? `in ${quoted(where)}` : "globally"}.`,
         { scope: guildId ? "guild" : "global", commands: all.map(digest) }
       );
     })
@@ -200,7 +201,7 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
         body: { name: clean, description, options: toApiOptions(options) },
       })) as APIApplicationCommand;
       return ok(
-        `/${created.name} is registered ${guildId ? `in ${where}` : "globally"}.`,
+        `/${plainText(created.name)} is registered ${guildId ? `in ${quoted(where)}` : "globally"}.`,
         digest(created),
         guildId
           ? undefined
@@ -247,7 +248,7 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
         body,
       })) as APIApplicationCommand;
       return ok(
-        `/${updated.name} updated ${guildId ? `in ${where}` : "globally"}.`,
+        `/${plainText(updated.name)} updated ${guildId ? `in ${quoted(where)}` : "globally"}.`,
         digest(updated)
       );
     })
@@ -267,7 +268,7 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
         guild: guildParam,
         bot: botParam,
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -282,8 +283,8 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would unregister /${found.name} ` +
-          `${guildId ? `in ${where}` : "globally"}; it stops appearing for ` +
+          `Would unregister /${plainText(found.name)} ` +
+          `${guildId ? `in ${quoted(where)}` : "globally"}; it stops appearing for ` +
           "users. Registering it again restores it.",
         previewDetails: digest(found),
       });
@@ -291,7 +292,7 @@ export function registerAppCommandTools(server: McpServer, config: OmnicordConfi
 
       await rest.delete(commandRoute(appId, found.id, guildId));
       return ok(
-        `/${found.name} is unregistered ${guildId ? `in ${where}` : "globally"}.`,
+        `/${plainText(found.name)} is unregistered ${guildId ? `in ${quoted(where)}` : "globally"}.`,
         digest(found)
       );
     })

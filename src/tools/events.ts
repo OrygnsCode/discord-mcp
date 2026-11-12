@@ -13,10 +13,12 @@ import type {
   RESTPostAPIGuildScheduledEventJSONBody,
 } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { resolveOne } from "../discord/resolve.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import { CONFIRM_STEPS } from "./grantGate.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -26,6 +28,7 @@ import {
   ToolProblem,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // Scheduled events: voice, stage, and external.
@@ -110,7 +113,7 @@ function parseWhen(value: string, label: string): string {
 
 export function registerEventTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "list_events",
@@ -150,7 +153,7 @@ export function registerEventTools(
       const { rest, guildId } = await enter(config, guild);
       const found = await resolveEvent(rest, guildId, event);
       return ok(
-        `${found.name}: ${TYPE_LABELS[found.entity_type]}, ` +
+        `${quoted(found.name)}: ${TYPE_LABELS[found.entity_type]}, ` +
           `${STATUS_LABELS[found.status]}, starts ${found.scheduled_start_time}.`,
         eventDigest(found)
       );
@@ -278,11 +281,11 @@ export function registerEventTools(
 
       const created = (await rest.post(Routes.guildScheduledEvents(guildId), {
         body,
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as APIGuildScheduledEvent;
 
       return ok(
-        `Scheduled "${created.name}" (${type})` +
+        `Scheduled ${quoted(created.name)} (${type})` +
           (repeat ? `, repeating ${repeat},` : "") +
           ` for ${created.scheduled_start_time}.`,
         eventDigest(created),
@@ -297,7 +300,9 @@ export function registerEventTools(
       title: "Update event",
       description:
         "Edit a scheduled event's details, or move it through its " +
-        "lifecycle: status start makes it live, status end completes it.",
+        "lifecycle: status start makes it live, status end completes it. " +
+        "An ended event cannot be started again, so ending one needs " +
+        `confirming: ${CONFIRM_STEPS}. Everything else happens at once.`,
       inputSchema: {
         event: z.string().describe("Event name or ID."),
         guild: guildParam,
@@ -307,6 +312,7 @@ export function registerEventTools(
         end_time: z.string().optional(),
         location: z.string().max(100).optional(),
         status: z.enum(["start", "end"]).optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -319,6 +325,7 @@ export function registerEventTools(
       end_time,
       location,
       status,
+      confirm_token,
     }) => {
       const { rest, guildId } = await enter(config, guild);
       const found = await resolveEvent(rest, guildId, event);
@@ -330,7 +337,7 @@ export function registerEventTools(
       const body: Record<string, unknown> = {};
       if (name !== undefined) {
         body.name = name;
-        changes.push(`name to "${name}"`);
+        changes.push(`name to ${quoted(name)}`);
       }
       if (description !== undefined) {
         body.description = description;
@@ -367,12 +374,36 @@ export function registerEventTools(
       }
       if (changes.length === 0) return fail("Pass at least one field to change.");
 
+      // Ending is the one change here that cannot be taken back: Discord
+      // keeps a completed event as it is, and nothing starts it again.
+      if (status === "end") {
+        const others = changes.filter((c) => c !== "status to completed");
+        const gate = gateDestructive({
+          tool: "update_event",
+          args: {
+            event: found.id,
+            name: name ?? null,
+            description: description ?? null,
+            start_time: start_time ?? null,
+            end_time: end_time ?? null,
+            location: location ?? null,
+            status,
+          },
+          confirmToken: confirm_token,
+          previewSummary:
+            `Would end the event ${quoted(found.name)} now, for everyone in it. An event that has ended cannot be started again.` +
+            (others.length ? ` The same call also changes its ${others.join(", ")}.` : ""),
+          previewDetails: { event: { id: found.id, name: found.name }, changes },
+        });
+        if (gate) return gate;
+      }
+
       const updated = (await rest.patch(
         Routes.guildScheduledEvent(guildId, found.id),
-        { body, reason: "Updated via Omnicord" }
+        { body, reason: "Updated via discord-mcp" }
       )) as APIGuildScheduledEvent;
 
-      return ok(`Updated "${updated.name}": ${changes.join(", ")}.`, eventDigest(updated));
+      return ok(`Updated ${quoted(updated.name)}: ${changes.join(", ")}.`, eventDigest(updated));
     })
   );
 
@@ -389,7 +420,7 @@ export function registerEventTools(
         event: z.string().describe("Event name or ID."),
         guild: guildParam,
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -406,16 +437,16 @@ export function registerEventTools(
         dryRun: dry_run,
         confirmToken: confirm_token,
         previewSummary:
-          `Would cancel "${found.name}" (starts ${found.scheduled_start_time}, ` +
+          `Would cancel ${quoted(found.name)} (starts ${found.scheduled_start_time}, ` +
           `${found.user_count ?? 0} interested).`,
         previewDetails: eventDigest(found),
       });
       if (gate) return gate;
 
       await rest.delete(Routes.guildScheduledEvent(guildId, found.id), {
-        reason: "Canceled via Omnicord",
+        reason: "Canceled via discord-mcp",
       });
-      return ok(`Canceled the event "${found.name}".`, {
+      return ok(`Canceled the event ${quoted(found.name)}.`, {
         canceled: true,
         id: found.id,
       });
@@ -444,13 +475,22 @@ export function registerEventTools(
         { query: new URLSearchParams({ limit: String(limit ?? 25) }) }
       )) as Array<{ user: { id: string; username: string; global_name?: string | null } }>;
 
-      return ok(`${users.length} member(s) interested in "${found.name}".`, {
+      // The event carries the real number; the list is one page of it.
+      const total = found.user_count;
+      const partial = total !== undefined && total > users.length;
+      return ok(
+        partial
+          ? `${total} member(s) interested in ${quoted(found.name)}; listing ${users.length}.`
+          : `${total ?? users.length} member(s) interested in ${quoted(found.name)}.`,
+        {
         event: { id: found.id, name: found.name },
+        interested: total ?? users.length,
         attendees: users.map((u) => ({
           id: u.user.id,
           name: u.user.global_name ?? u.user.username,
         })),
-      });
+        }
+      );
     })
   );
 }

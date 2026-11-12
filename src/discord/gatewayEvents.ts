@@ -15,6 +15,7 @@ import type {
   GatewayMessageReactionRemoveDispatchData,
   GatewayVoiceStateUpdateDispatchData,
 } from "discord-api-types/v10";
+import { isObfuscated } from "./hiddenChannels.js";
 import type { IntentStatus } from "./intents.js";
 
 // The pure half of the gateway: intent selection, dispatch normalization,
@@ -162,6 +163,9 @@ export function normalizeDispatch(t: string, d: unknown): Draft | null {
     case GatewayDispatchEvents.ChannelCreate:
     case GatewayDispatchEvents.ChannelDelete: {
       const c = d as GatewayChannelCreateDispatchData | GatewayChannelDeleteDispatchData;
+      // A channel the bot cannot see arrives with a placeholder name; report
+      // it as hidden rather than pass that placeholder off as the name.
+      const hidden = isObfuscated(c as { flags?: number });
       return {
         type:
           t === GatewayDispatchEvents.ChannelCreate
@@ -170,7 +174,9 @@ export function normalizeDispatch(t: string, d: unknown): Draft | null {
         guild_id: "guild_id" in c ? (c.guild_id ?? null) : null,
         channel_id: c.id,
         actor: null,
-        data: { name: "name" in c ? c.name : null, channel_type: c.type },
+        data: hidden
+          ? { name: null, channel_type: c.type, hidden_from_bot: true }
+          : { name: "name" in c ? c.name : null, channel_type: c.type },
       };
     }
     case GatewayDispatchEvents.GuildRoleCreate: {
@@ -246,6 +252,11 @@ const BUFFER_CAP = 500;
 export interface Subscription {
   id: string;
   types: Set<string>;
+  // The server whose events are recorded. The gateway bot hears every
+  // server it is in, so without this a subscription made while looking at
+  // one server filled with another server's messages too. Null only for
+  // subscriptions made by code that wants everything.
+  guildId: string | null;
   channelId: string | null;
   includeBots: boolean;
   buffer: NormalizedEvent[];
@@ -260,12 +271,14 @@ export class EventBus {
   subscribe(options: {
     id: string;
     types: string[];
+    guildId?: string | null;
     channelId?: string | null;
     includeBots?: boolean;
   }): Subscription {
     const sub: Subscription = {
       id: options.id,
       types: new Set(options.types),
+      guildId: options.guildId ?? null,
       channelId: options.channelId ?? null,
       includeBots: options.includeBots ?? false,
       buffer: [],
@@ -297,6 +310,7 @@ export class EventBus {
     };
     for (const sub of this.subscriptions.values()) {
       if (!sub.types.has(event.type)) continue;
+      if (sub.guildId && event.guild_id !== sub.guildId) continue;
       if (sub.channelId && event.channel_id !== sub.channelId) continue;
       if (!sub.includeBots && event.actor?.bot) continue;
       sub.buffer.push(event);

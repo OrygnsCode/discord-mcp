@@ -1,4 +1,4 @@
-// Calls one Omnicord tool from the command line. Dev utility.
+// Calls one tool from the command line. Dev utility.
 //
 // Usage: node scripts/call-tool.mjs <tool_name> '<json_args>'
 // Example: node scripts/call-tool.mjs list_channels '{}'
@@ -55,7 +55,7 @@ function request(method, params) {
 await request("initialize", {
   protocolVersion: "2025-06-18",
   capabilities: {},
-  clientInfo: { name: "omnicord-call-tool", version: "0.0.1" },
+  clientInfo: { name: "discord-mcp-call-tool", version: "0.0.1" },
 });
 child.stdin.write(
   JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }) + "\n"

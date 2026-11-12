@@ -229,6 +229,9 @@ const MODERATOR_PRESET =
   MEMBER_PRESET |
   P.ManageMessages |
   P.PinMessages |
+  // Since 2026-02-23 Manage Messages no longer lets people skip slowmode;
+  // this does. Bots are never slowed, so it matters for human moderators.
+  P.BypassSlowmode |
   P.ManageThreads |
   P.ModerateMembers |
   P.KickMembers |
@@ -252,7 +255,13 @@ const ADMIN_PRESET =
   P.CreateEvents |
   P.ManageGuildExpressions |
   P.CreateGuildExpressions |
-  P.CreateInstantInvite;
+  P.CreateInstantInvite |
+  // Needed by set_voice_channel_status. This preset is also the bot's
+  // recommended invite, so without it that tool could never work.
+  P.SetVoiceChannelStatus |
+  // A read-only channel denies @everyone the whole send family, private
+  // threads included, and Discord lets a bot deny only what it has itself.
+  P.CreatePrivateThreads;
 
 export const PERMISSION_PRESETS: Record<string, bigint> = {
   none: 0n,

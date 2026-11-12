@@ -1,7 +1,8 @@
 // Application flag bits that report gateway intent enablement, taken from
 // the application resource docs. Each intent has two bits: the full flag
-// (granted after verification, for bots in 100+ servers) and the LIMITED
-// flag (set while the bot is under 100 servers). Either one means the
+// (granted after a review, which Discord requires once more than 10,000
+// users can see the app; 100 servers before June 2026) and the LIMITED
+// flag (the self-service toggle below that point). Either one means the
 // toggle is on in the Developer Portal, so both are always tested.
 export const INTENT_FLAGS = {
   presence: (1 << 12) | (1 << 13),

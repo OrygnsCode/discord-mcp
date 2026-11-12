@@ -2,11 +2,11 @@
 //
 // Every tool definition a client loads costs context before the user types
 // anything, and a large tool surface measurably hurts tool selection. The full
-// set is around 120 KB of JSON, so an operator who only wants chat and
+// set is around 125 KB of JSON, so an operator who only wants chat and
 // moderation should not have to carry the builder, forum, and soundboard
 // schemas as well.
 //
-// OMNICORD_TOOLS selects groups by name. Unset means every group, so an
+// DISCORD_MCP_TOOLS selects groups by name. Unset means every group, so an
 // existing install behaves exactly as it did before. The core group is always
 // present: without diagnostics and the read tools the server cannot answer
 // "which servers am I in" or "did my setup work", which makes every other
@@ -34,6 +34,7 @@ const CORE = [
   "search_members",
   "get_member",
   "find",
+  "catch_up",
 ] as const;
 
 // Optional groups, selected by name.
@@ -109,6 +110,12 @@ const OPTIONAL: Record<string, readonly string[]> = {
     "lock_channel",
     "unlock_channel",
     "explain_permissions",
+    "get_channel_access",
+    "get_member_access",
+    "audit_server_security",
+    // Undo covers every structural change, most of which happen here.
+    "list_changes",
+    "undo_change",
   ],
 
   // Building a server from a brief, and blueprints as the persistence format.
@@ -122,6 +129,7 @@ const OPTIONAL: Record<string, readonly string[]> = {
     "get_blueprint",
     "delete_blueprint",
     "export_server_blueprint",
+    "import_server_template",
     "diff_blueprint",
   ],
 
@@ -205,6 +213,8 @@ const OPTIONAL: Record<string, readonly string[]> = {
     "sync_server_template",
     "delete_server_template",
     "set_bot_presence",
+    "update_bot_profile",
+    "leave_server",
   ],
 
   // Live gateway events.
@@ -231,7 +241,7 @@ export interface ToolsetSelection {
   all: boolean;
 }
 
-// Resolves the OMNICORD_TOOLS setting. Pure, so the unit suite can cover
+// Resolves the DISCORD_MCP_TOOLS setting. Pure, so the unit suite can cover
 // every branch without touching the environment.
 //
 // Unset, empty, or "all" selects everything. Otherwise the value is a comma
@@ -267,14 +277,18 @@ export function selectToolsets(raw: string | undefined): ToolsetSelection {
   return { groups, tools, unknown, all: false };
 }
 
-// The message shown when OMNICORD_TOOLS names a group that does not exist.
+// The message shown when DISCORD_MCP_TOOLS names a group that does not exist.
 // Startup fails rather than silently exposing a smaller surface than the
 // operator asked for, which would look like tools going missing at random.
-export function unknownToolsetMessage(unknown: string[]): string {
+// `variable` is the name the operator actually set, old or new.
+export function unknownToolsetMessage(
+  unknown: string[],
+  variable = "DISCORD_MCP_TOOLS"
+): string {
   const plural = unknown.length === 1 ? "group" : "groups";
   return (
-    `OMNICORD_TOOLS names unknown ${plural}: ${unknown.join(", ")}. ` +
+    `${variable} names unknown ${plural}: ${unknown.join(", ")}. ` +
     `Valid groups are: ${TOOLSET_NAMES.join(", ")}. ` +
-    `The core group is always enabled. Leave OMNICORD_TOOLS unset for every tool.`
+    `The core group is always enabled. Leave ${variable} unset for every tool.`
   );
 }

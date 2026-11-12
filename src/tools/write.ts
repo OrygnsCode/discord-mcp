@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Routes, PermissionFlagsBits, MessageReferenceType } from "discord-api-types/v10";
+import { Routes, PermissionFlagsBits, MessageReferenceType, RESTJSONErrorCodes } from "discord-api-types/v10";
 import type {
   APIGuildMember,
   APIMessage,
@@ -8,11 +8,10 @@ import type {
   RESTPostAPIGuildChannelJSONBody,
   RESTPostAPIGuildRoleJSONBody,
 } from "discord-api-types/v10";
-import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import { DiscordAPIError } from "@discordjs/rest";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import {
-  getChannels,
   getRoles,
   getBotUser,
   invalidateGuildCaches,
@@ -24,14 +23,17 @@ import {
   COMPONENTS_V2_FLAG,
   type ComponentBlock,
 } from "../discord/components.js";
+import { changeData, recordChange, undoNote } from "./changes.js";
 import {
-  compileOverwrites,
   EveryoneRoleError,
+  gateBitsFor,
+  patchOverwrites,
+  roleIdsFor,
   UnknownRoleError,
   type OverwriteSpec,
+  type SugarChange,
 } from "../builder/overwrites.js";
 import {
-  computeChannelPermissions,
   computeGuildPermissions,
   highestRolePosition,
   parsePermissionNames,
@@ -41,7 +43,18 @@ import {
   ALL_PERMISSIONS,
 } from "../discord/preflight.js";
 import { resolveOne } from "../discord/resolve.js";
+import { assertLinkedChannel } from "../discord/messageLinks.js";
+import {
+  channelLabel,
+  grantLines,
+  grantPhrase,
+  grantsBetween,
+  grantsKey,
+  hasGrants,
+} from "../discord/grants.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
+import { CONFIRM_STEPS, POWER_EXAMPLES, hiddenNote, loadScene } from "./grantGate.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -50,14 +63,21 @@ import {
   resolveChannel,
   resolveMember,
   memberDisplayName,
-  ToolProblem,
   TEXT_BEARING_TYPES,
   botPermissions,
   requirePermissions,
   parseHexColor,
   embedsParam,
+  embedFilesProblem,
   mapEmbeds,
+  confirmTokenParam,
+  postWithFiles,
+  messageIdParam,
 } from "./common.js";
+import { sameOverwriteList } from "../builder/categorySync.js";
+import { filesParam, prepareFiles, unreferencedFiles, type PreparedFiles } from "../discord/uploads.js";
+import { channelSettingsBody, channelSettingsContext, channelSettingsFields, hasChannelSettings } from "./channelSettings.js";
+import { roleAppearanceBody, roleAppearanceFields } from "./roleAppearance.js";
 
 // Write tools: the Phase 2 core. Everything here changes state on Discord,
 // so every tool preflights the bot's actual permissions and explains what
@@ -82,7 +102,7 @@ const MENTION_MODES: Record<string, string[]> = {
 
 export function registerWriteTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "send_message",
@@ -91,9 +111,11 @@ export function registerWriteTools(
       description:
         "Send a message to a channel, optionally as a reply, with embeds, " +
         "or as a Components V2 layout of text, sections, image galleries, " +
-        "separators and link buttons inside colored containers. Components " +
-        "replace content and embeds rather than joining them, and the " +
-        "choice is permanent for that message. For a private message to " +
+        "separators and link buttons inside colored containers, and with up " +
+        "to 10 files fetched from public URLs. Components replace content " +
+        "and embeds rather than joining them, and the choice is permanent " +
+        "for that message; in a layout, a file shows only where a gallery " +
+        "or thumbnail points at it as attachment://<filename>. For a private message to " +
         "one person use send_dm; to post under a custom name and avatar " +
         "use send_webhook_message; to send later use schedule_message. " +
         "Mentions are suppressed by default; raise the mentions mode only " +
@@ -102,9 +124,9 @@ export function registerWriteTools(
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
         content: z.string().min(1).max(2000).optional()
-          .describe("Message text. Required unless components is used."),
-        reply_to: z.string().optional()
-          .describe("Message ID to reply to."),
+          .describe("Message text. May be left out when embeds, files, or components carry the message."),
+        reply_to: messageIdParam.optional()
+          .describe("Message to reply to: its ID or link."),
         mentions: z
           .enum(["none", "users", "roles_and_users", "everything"])
           .optional()
@@ -113,6 +135,7 @@ export function registerWriteTools(
           .describe("Send without triggering notifications."),
         embeds: embedsParam,
         components: componentsParam,
+        files: filesParam,
         dry_run: z.boolean().optional()
           .describe("Preview without sending."),
       },
@@ -127,6 +150,7 @@ export function registerWriteTools(
       silent,
       embeds,
       components,
+      files,
       dry_run,
     }) => {
       // Components V2 is a whole-message mode, not an extra field. Discord
@@ -149,8 +173,16 @@ export function registerWriteTools(
             "is the closest equivalent."
         );
       }
-      if (!layout && content === undefined) {
-        return fail("Pass content, or components for a rich layout.");
+      // An embed is a whole message by itself: it is how announcements and
+      // bot posts are usually written.
+      if (!layout && content === undefined && !files && !(embeds && embeds.length > 0)) {
+        return fail("Pass content, embeds, files, or components for a rich layout.");
+      }
+      if (layout && files?.some((f) => f.spoiler)) {
+        return fail(
+          "In a components layout, mark a file as a spoiler on the gallery or " +
+            "thumbnail entry that shows it (spoiler: true), not on the file."
+        );
       }
 
       let compiled: ReturnType<typeof compileComponents> | undefined;
@@ -158,6 +190,9 @@ export function registerWriteTools(
         compiled = compileComponents(layout);
         if (!compiled.ok) return fail(compiled.reason);
       }
+      // An embed that cannot be sent is refused before any request, and so
+      // before a dry run says it would go.
+      const cards = embeds && embeds.length > 0 ? mapEmbeds(embeds) : undefined;
 
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveChannel(
@@ -166,6 +201,9 @@ export function registerWriteTools(
         channel,
         TEXT_BEARING_TYPES
       );
+      // A reply goes in the body, not the route, so a link to a message in
+      // another channel is caught here.
+      if (reply_to) assertLinkedChannel(reply_to, target.id);
 
       const perms = await botPermissions(rest, guildId, target);
       const needed: Array<[bigint, string]> = [
@@ -174,25 +212,59 @@ export function registerWriteTools(
       ];
       // Galleries and thumbnails render as embedded media, so they need the
       // same permission an embed does.
-      if ((embeds && embeds.length > 0) || (compiled?.ok && compiled.hasMedia)) {
+      if (cards || (compiled?.ok && compiled.hasMedia)) {
         needed.push([P.EmbedLinks, "Embed Links"]);
       }
       if (mentions === "everything") {
         needed.push([P.MentionEveryone, "Mention Everyone"]);
       }
-      requirePermissions(perms, needed, `in #${target.name}`);
+      if (files) needed.push([P.AttachFiles, "Attach Files"]);
+      requirePermissions(perms, needed, `in ${channelLabel(target)}`);
+
+      // Files are fetched before anything is sent, dry run included, so a
+      // bad URL is reported now rather than as a half-sent message.
+      let prepared: PreparedFiles | undefined;
+      if (files) {
+        const got = await prepareFiles(files);
+        if (!got.ok) return fail(`Nothing was sent. ${got.error}`);
+        prepared = got.value;
+        if (compiled?.ok) {
+          const missing = unreferencedFiles(compiled.components, prepared.attachments.map((a) => a.filename));
+          if (missing.length > 0) {
+            return fail(
+              "Nothing was sent. In a components layout a file shows only where a gallery " +
+                "or thumbnail points at it, and nothing points at " +
+                missing.map((n) => `attachment://${n}`).join(", ") +
+                ". Use those exact names as media urls, or give each file a filename to match.",
+              { files: prepared.summary }
+            );
+          }
+        }
+      }
+      const lost = embedFilesProblem(embeds, prepared?.attachments.map((a) => a.filename) ?? [], {
+        some: "Use one of those exact names, or give a file a filename to match.",
+        none: "Pass the picture in files with that filename, or use an http or https link.",
+      });
+      if (lost) return fail(`Nothing was sent. ${lost}`, prepared ? { files: prepared.summary } : undefined);
 
       if (dry_run) {
         return ok(
           "Dry run: would send " +
             (compiled?.ok
               ? `a ${compiled.count}-component layout`
-              : `${content?.length ?? 0} characters`) +
-            ` to #${target.name}` +
+              : content
+                ? `${content.length} characters`
+                : "no text") +
+            ` to ${channelLabel(target)}` +
             (reply_to ? ` as a reply to ${reply_to}` : "") +
-            (embeds?.length ? ` with ${embeds.length} embed(s)` : "") +
+            (cards ? ` with ${cards.length} embed(s)` : "") +
+            (prepared ? ` with ${prepared.files.length} file(s) attached` : "") +
             ". Nothing was sent.",
-          { executed: false, channel: { id: target.id, name: target.name } }
+          {
+            executed: false,
+            channel: { id: target.id, name: target.name },
+            ...(prepared ? { files: prepared.summary } : {}),
+          }
         );
       }
 
@@ -211,23 +283,24 @@ export function registerWriteTools(
         },
         ...(reply_to ? { message_reference: { message_id: reply_to } } : {}),
         ...(flags !== 0 ? { flags } : {}),
-        ...(embeds && embeds.length > 0 ? { embeds: mapEmbeds(embeds) } : {}),
+        ...(cards ? { embeds: cards } : {}),
         ...(compiled?.ok ? { components: compiled.components as never } : {}),
+        ...(prepared ? { attachments: prepared.attachments as never } : {}),
       };
 
-      const sent = (await rest.post(Routes.channelMessages(target.id), {
-        body,
-      })) as APIMessage;
+      const sent = (await postWithFiles(rest, Routes.channelMessages(target.id), body, prepared)) as APIMessage;
 
       return ok(
-        `Sent to #${target.name}` +
+        `Sent to ${channelLabel(target)}` +
           (reply_to ? ` as a reply` : "") +
+          (prepared ? ` with ${prepared.files.length} file(s)` : "") +
           `. Message ID ${sent.id}.`,
         {
           id: sent.id,
           channel: { id: target.id, name: target.name },
           jump_link: jumpLink(guildId, target.id, sent.id),
           ...(compiled?.ok ? { components_v2: true } : {}),
+          ...(prepared ? { files: (sent.attachments ?? []).map((a) => ({ filename: a.filename, bytes: a.size, url: a.url })) } : {}),
         },
         compiled?.ok
           ? [
@@ -253,7 +326,7 @@ export function registerWriteTools(
         guild: guildParam,
         channel: z.string().describe("Channel to forward the message into (name or ID)."),
         from_channel: z.string().describe("Channel the message is currently in (name or ID)."),
-        message_id: z.string().describe("ID of the message to forward."),
+        message_id: messageIdParam.describe("The message to forward: its ID or link."),
         content: z.string().max(2000).optional()
           .describe("Optional note, posted as a separate message just before the forward."),
       },
@@ -263,18 +336,20 @@ export function registerWriteTools(
       const { rest, guildId } = await enter(config, guild);
       const target = await resolveChannel(rest, guildId, channel, TEXT_BEARING_TYPES);
       const source = await resolveChannel(rest, guildId, from_channel, TEXT_BEARING_TYPES);
+      // Checked before the note is posted: the reference travels in a body.
+      assertLinkedChannel(message_id, source.id);
 
       const targetPerms = await botPermissions(rest, guildId, target);
       requirePermissions(
         targetPerms,
         [[P.ViewChannel, "View Channel"], [P.SendMessages, "Send Messages"]],
-        `in #${target.name}`
+        `in ${channelLabel(target)}`
       );
       const sourcePerms = await botPermissions(rest, guildId, source);
       requirePermissions(
         sourcePerms,
         [[P.ViewChannel, "View Channel"], [P.ReadMessageHistory, "Read Message History"]],
-        `in #${source.name}`
+        `in ${channelLabel(source)}`
       );
 
       // Discord rejects content on the forward itself, so a note goes as its
@@ -289,19 +364,57 @@ export function registerWriteTools(
         })) as APIMessage;
       }
 
-      const sent = (await rest.post(Routes.channelMessages(target.id), {
-        body: {
-          allowed_mentions: { parse: [] as never },
-          message_reference: {
-            type: MessageReferenceType.Forward,
-            channel_id: source.id,
-            message_id,
-          },
-        } as RESTPostAPIChannelMessageJSONBody,
-      })) as APIMessage;
+      let sent: APIMessage;
+      try {
+        sent = (await rest.post(Routes.channelMessages(target.id), {
+          body: {
+            allowed_mentions: { parse: [] as never },
+            message_reference: {
+              type: MessageReferenceType.Forward,
+              channel_id: source.id,
+              message_id,
+            },
+          } as RESTPostAPIChannelMessageJSONBody,
+        })) as APIMessage;
+      } catch (err) {
+        // Whatever stopped the forward, the note is taken back: on its own
+        // it reads as a message about nothing.
+        let noteLeft = false;
+        if (note) {
+          await rest.delete(Routes.channelMessage(target.id, note.id)).catch(() => {
+            noteLeft = true;
+          });
+        }
+        const noteSaid = !note
+          ? ""
+          : noteLeft
+            ? ` The note posted ahead of it could not be removed; its message ID is ${note.id}.`
+            : " The note posted ahead of it was removed.";
+        // Since 2026-04-14 Discord forwards only messages whose content the
+        // bot can read.
+        if (
+          err instanceof DiscordAPIError &&
+          err.code === RESTJSONErrorCodes.CannotForwardMessageWithUnreadableContent
+        ) {
+          return fail(
+            "Discord only forwards messages whose content the bot can read, and it cannot " +
+              "read this one. Turn on the Message Content intent on the Bot page of the " +
+              "Developer Portal, then try again." +
+              noteSaid
+          );
+        }
+        if (err instanceof DiscordAPIError && err.status === 404) {
+          return fail(`There is no message ${message_id} in ${channelLabel(source)} to forward.` + noteSaid);
+        }
+        if (note) {
+          const reason = err instanceof Error ? err.message : String(err);
+          return fail(`The forward failed: ${reason}.` + noteSaid);
+        }
+        throw err;
+      }
 
       return ok(
-        `Forwarded the message into #${target.name}. Message ID ${sent.id}.` +
+        `Forwarded the message into ${channelLabel(target)}. Message ID ${sent.id}.` +
           (note ? " Posted your note with it." : ""),
         {
           id: sent.id,
@@ -325,7 +438,9 @@ export function registerWriteTools(
         "compile to permission overwrites and are applied in the same call, " +
         "so a private channel is one request rather than a create followed " +
         "by set_channel_permissions. Use set_channel_permissions for " +
-        "anything finer. Supports dry_run.",
+        "anything finer. Voice and forum settings (bitrate, user limit, " +
+        "region, default reaction, sort, layout, required tags) can be set " +
+        "at creation too. Supports dry_run.",
       inputSchema: {
         guild: guildParam,
         name: z.string().min(1).max(100).describe("Channel name."),
@@ -352,27 +467,30 @@ export function registerWriteTools(
           ),
         posting_roles: z.array(z.string()).max(20).optional()
           .describe(
-            "Role names that may still post when read_only is set. Has no " +
-              "effect on its own."
+            "Role names that may still post and start threads when " +
+              "read_only is set. Has no effect on its own."
           ),
+        ...channelSettingsFields,
         dry_run: z.boolean().optional()
           .describe("Preview without creating."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({
-      guild,
-      name,
-      type,
-      category,
-      topic,
-      slowmode_seconds,
-      nsfw,
-      private_to,
-      read_only,
-      posting_roles,
-      dry_run,
-    }) => {
+    guarded(async (args) => {
+      const {
+        guild,
+        name,
+        type,
+        category,
+        topic,
+        slowmode_seconds,
+        nsfw,
+        private_to,
+        read_only,
+        posting_roles,
+        dry_run,
+        ...settingsInput
+      } = args;
       const { rest, guildId } = await enter(config, guild);
 
       const typeMap: Record<string, number> = {
@@ -388,6 +506,15 @@ export function registerWriteTools(
 
       if (category && kind === "category") {
         return fail("A category cannot be placed inside another category.");
+      }
+      let settings: { body: Record<string, unknown>; changes: string[] } = { body: {}, changes: [] };
+      if (hasChannelSettings(settingsInput)) {
+        const built = channelSettingsBody(settingsInput, typeCode, {
+          ...(await channelSettingsContext(rest, guildId, settingsInput)),
+          creating: true,
+        });
+        if (!built.ok) return fail(built.reason);
+        settings = built;
       }
 
       // posting_roles is an exception carved out of read_only. On its own
@@ -449,17 +576,30 @@ export function registerWriteTools(
 
         const botUser = await getBotUser(rest);
         try {
-          overwrites = compileOverwrites(
-            {
-              kind,
-              privateTo: private_to,
-              readOnly: read_only,
-              postingRoles: posting_roles,
-            },
-            byName,
+          // Start from the category's overwrites, the way Discord does for a
+          // channel created without any, and change only what was asked.
+          // Sending a fresh set replaces the category's, so a read-only
+          // channel in a private category used to come out visible to
+          // everyone.
+          const change: SugarChange = {};
+          if ((private_to?.length ?? 0) > 0) {
+            change.privacy = {
+              private: true,
+              roles: roleIdsFor(private_to ?? [], byName, guildId, "private_to"),
+            };
+          }
+          if (read_only === true) {
+            change.send = {
+              readOnly: true,
+              postingRoles: roleIdsFor(posting_roles ?? [], byName, guildId, "posting_roles"),
+            };
+          }
+          overwrites = patchOverwrites(parent?.permission_overwrites ?? [], change, {
             guildId,
-            botUser.id
-          );
+            botUserId: botUser.id,
+            gateBits: gateBitsFor(kind),
+            settable: perms,
+          }).overwrites;
         } catch (err) {
           if (err instanceof UnknownRoleError) {
             return fail(err.message, {
@@ -491,8 +631,9 @@ export function registerWriteTools(
       if (dry_run) {
         return ok(
           `Dry run: would create ${kind} channel "${name}"` +
-            (parent ? ` under category ${parent.name}` : "") +
+            (parent ? ` under category ${quoted(parent.name)}` : "") +
             access +
+            (settings.changes.length ? ` (${settings.changes.join(", ")})` : "") +
             ". Nothing was created.",
           {
             executed: false,
@@ -513,28 +654,47 @@ export function registerWriteTools(
         ...(overwrites.length > 0
           ? { permission_overwrites: overwrites as never }
           : {}),
+        ...(settings.body as Partial<RESTPostAPIGuildChannelJSONBody>),
       };
 
       const created = (await rest.post(Routes.guildChannels(guildId), {
         body,
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as GuildChannelLite;
       invalidateGuildCaches(guildId);
 
+      const recorded = await recordChange(rest, guildId, "create_channel", [
+        { op: "created", kind: created.type === 4 ? "category" : "channel", id: created.id, name: created.name ?? name, channelType: created.type },
+      ]);
+      // Whether it follows its category: Discord applies a change to one of
+      // the category's permissions to every channel that matches them exactly.
+      const synced =
+        parent && created.type !== 4
+          ? sameOverwriteList(created.permission_overwrites, parent.permission_overwrites)
+          : undefined;
       return ok(
-        `Created ${kind} channel ${created.name} (${created.id})` +
-          (parent ? ` under ${parent.name}` : "") +
+        `Created ${kind} channel ${quoted(created.name)} (${created.id})` +
+          (parent ? ` under ${quoted(parent.name)}` : "") +
           access +
           (kind === "text" && created.name !== name
             ? `. Discord normalized the name from "${name}".`
-            : "."),
+            : ".") +
+          (synced === true
+            ? ` It matches the permissions of its category, ${quoted(parent?.name)}, exactly (synced), so a change to the category's permissions reaches it too.`
+            : synced === false
+              ? ` It has permissions of its own, so changes to the permissions of its category, ${quoted(parent?.name)}, do not reach it.`
+              : "") +
+          undoNote(recorded),
         {
           id: created.id,
           name: created.name,
           type: kind,
           category: parent ? { id: parent.id, name: parent.name } : null,
+          ...(synced !== undefined ? { synced_with_category: synced } : {}),
           ...(restricted ? { permission_overwrites: overwrites } : {}),
-        }
+          ...changeData(recorded),
+        },
+        recorded.warning ? [recorded.warning] : []
       );
     })
   );
@@ -547,7 +707,8 @@ export function registerWriteTools(
         "Create a role from a vetted preset (none, member, moderator, " +
         "admin) and/or an explicit list of permission names. Administrator " +
         "is never granted by a preset; it must be spelled out explicitly. " +
-        "Supports dry_run.",
+        "Can start with a gradient or holographic color and an icon where " +
+        "the server has those features. Supports dry_run.",
       inputSchema: {
         guild: guildParam,
         name: z.string().min(1).max(100).describe("Role name."),
@@ -565,6 +726,7 @@ export function registerWriteTools(
         hoist: z.boolean().optional()
           .describe("Show members separately in the sidebar."),
         mentionable: z.boolean().optional(),
+        ...roleAppearanceFields,
         dry_run: z.boolean().optional()
           .describe("Preview without creating."),
       },
@@ -578,9 +740,15 @@ export function registerWriteTools(
       color,
       hoist,
       mentionable,
+      secondary_color,
+      holographic,
+      icon_url,
+      icon_emoji,
       dry_run,
     }) => {
       const { rest, guildId } = await enter(config, guild);
+      const appearance = await roleAppearanceBody(rest, guildId, { color, secondary_color, holographic, icon_url, icon_emoji });
+      if (!appearance.ok) return fail(appearance.reason);
 
       let bits = PERMISSION_PRESETS[preset ?? "none"];
       if (permissions && permissions.length > 0) {
@@ -617,7 +785,9 @@ export function registerWriteTools(
       if (dry_run) {
         return ok(
           `Dry run: would create role "${name}" with ` +
-            `${grantSummary.length} permission(s). Nothing was created.`,
+            `${grantSummary.length} permission(s)` +
+            (appearance.changes.length ? ` (${appearance.changes.join(", ")})` : "") +
+            ". Nothing was created.",
           { executed: false, permissions: grantSummary }
         );
       }
@@ -625,26 +795,33 @@ export function registerWriteTools(
       const body: RESTPostAPIGuildRoleJSONBody = {
         name,
         permissions: bits.toString(),
-        ...(color ? { color: parseHexColor(color) } : {}),
+        ...(color && !appearance.setsColors ? { color: parseHexColor(color) } : {}),
+        ...(appearance.body as Partial<RESTPostAPIGuildRoleJSONBody>),
         ...(hoist !== undefined ? { hoist } : {}),
         ...(mentionable !== undefined ? { mentionable } : {}),
       };
 
       const created = (await rest.post(Routes.guildRoles(guildId), {
         body,
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as APIRole;
       invalidateGuildCaches(guildId);
 
+      const recorded = await recordChange(rest, guildId, "create_role", [
+        { op: "created", kind: "role", id: created.id, name: created.name },
+      ]);
       return ok(
-        `Created role ${created.name} (${created.id}) with ` +
-          `${grantSummary.length} permission(s).`,
+        `Created role ${quoted(created.name)} (${created.id}) with ` +
+          `${grantSummary.length} permission(s).` +
+          undoNote(recorded),
         {
           id: created.id,
           name: created.name,
           position: created.position,
           permissions: grantSummary,
-        }
+          ...changeData(recorded),
+        },
+        recorded.warning ? [recorded.warning] : []
       );
     })
   );
@@ -655,7 +832,10 @@ export function registerWriteTools(
       title: "Assign role",
       description:
         "Give a member a role. Preflights the bot's role hierarchy so the " +
-        "failure mode is an explanation, not a 403. Supports dry_run.",
+        "failure mode is an explanation, not a 403. Supports dry_run. A role " +
+        `that would give the member ${POWER_EXAMPLES}, or let them see ` +
+        `channels hidden from them now, needs confirming: ${CONFIRM_STEPS}. ` +
+        "Other roles are given at once.",
       inputSchema: {
         guild: guildParam,
         member: z.string().describe("Member name or user ID."),
@@ -664,10 +844,11 @@ export function registerWriteTools(
           .describe("Audit log reason."),
         dry_run: z.boolean().optional()
           .describe("Preview without assigning."),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ guild, member, role, reason, dry_run }) => {
+    guarded(async ({ guild, member, role, reason, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
 
       const [target, roles, botUser] = await Promise.all([
@@ -690,7 +871,7 @@ export function registerWriteTools(
 
       if (targetRole.managed) {
         return fail(
-          `${targetRole.name} is managed by an integration and cannot be ` +
+          `${quoted(targetRole.name)} is managed by an integration and cannot be ` +
             "assigned manually."
         );
       }
@@ -698,8 +879,8 @@ export function registerWriteTools(
       if (!target.user) return fail(`Could not load member "${member}".`);
       if (target.roles.includes(targetRole.id)) {
         return ok(
-          `${memberDisplayName(target)} already has the role ` +
-            `${targetRole.name}. Nothing to do.`,
+          `${quoted(memberDisplayName(target))} already has the role ` +
+            `${quoted(targetRole.name)}. Nothing to do.`,
           { already_assigned: true }
         );
       }
@@ -723,7 +904,7 @@ export function registerWriteTools(
       if (targetRole.position > botTop) {
         return fail(
           `The bot's highest role (position ${botTop}) is below ` +
-            `${targetRole.name} (position ${targetRole.position}). Discord ` +
+            `${quoted(targetRole.name)} (position ${targetRole.position}). Discord ` +
             "will reject this. Move the bot's role above the target role."
         );
       }
@@ -734,27 +915,73 @@ export function registerWriteTools(
         );
       }
 
+      // What the role hands them. Powers, or channels hidden from them now,
+      // wait for the user's confirmation: "give me the Staff role" is the
+      // plainest way to read a private channel. A role that hands out
+      // neither is given at once.
+      const who = memberDisplayName(target);
+      const scene = await loadScene(rest, guildId, { owner: true });
+      const grants = grantsBetween(
+        { scene, holder: { memberId: target.user.id, roleIds: target.roles } },
+        { scene, holder: { memberId: target.user.id, roleIds: [...target.roles, targetRole.id] } }
+      );
+      const hidden = hiddenNote(rest, guildId, scene);
+      if (hasGrants(grants)) {
+        const gate = gateDestructive({
+          tool: "assign_role",
+          args: { member: target.user.id, role: targetRole.id, grants: grantsKey(grants) },
+          dryRun: dry_run,
+          confirmToken: confirm_token,
+          previewSummary: `Would give ${quoted(who)} the role ${quoted(targetRole.name)}, which lets them ${grantPhrase(grants)}.`,
+          ...(hidden ? { note: hidden } : {}),
+          dialogLines: grantLines(grants),
+          previewDetails: {
+            member: { id: target.user.id, name: who },
+            role: { id: targetRole.id, name: targetRole.name },
+            grants: grantLines(grants),
+          },
+        });
+        if (gate) return gate;
+      }
+      const opens = hasGrants(grants) ? ` It lets them ${grantPhrase(grants)}.` : "";
+
       if (dry_run) {
         return ok(
-          `Dry run: would give ${targetRole.name} to ` +
-            `${memberDisplayName(target)}. Nothing was changed.`,
-          { executed: false },
+          `Dry run: would give ${quoted(targetRole.name)} to ` +
+            `${quoted(who)}. Nothing was changed.${opens}`,
+          { executed: false, ...(hasGrants(grants) ? { grants: grantLines(grants) } : {}) },
           warnings
         );
       }
 
+      const hadIt = target.roles.includes(targetRole.id);
       await rest.put(
         Routes.guildMemberRole(guildId, target.user.id, targetRole.id),
-        { reason: reason ?? "Assigned via Omnicord" }
+        { reason: reason ?? "Assigned via discord-mcp" }
       );
 
+      // Giving a role someone already has changes nothing worth undoing.
+      const recorded = hadIt
+        ? {}
+        : await recordChange(rest, guildId, "assign_role", [
+            {
+              op: "member_role",
+              change: "added",
+              member: target.user.id,
+              memberName: memberDisplayName(target),
+              role: targetRole.id,
+              name: targetRole.name,
+            },
+          ]);
       return ok(
-        `Gave ${targetRole.name} to ${memberDisplayName(target)}.`,
+        `Gave ${quoted(targetRole.name)} to ${quoted(who)}.${opens}` + undoNote(recorded),
         {
-          member: { id: target.user.id, name: memberDisplayName(target) },
+          member: { id: target.user.id, name: who },
           role: { id: targetRole.id, name: targetRole.name },
+          ...(hasGrants(grants) ? { grants: grantLines(grants) } : {}),
+          ...changeData(recorded),
         },
-        warnings
+        [...warnings, ...("warning" in recorded && recorded.warning ? [recorded.warning] : [])]
       );
     })
   );
@@ -773,12 +1000,11 @@ export function registerWriteTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        message_id: z.string().describe("ID of the message to delete."),
+        message_id: messageIdParam.describe("The message to delete: its ID or link."),
         reason: z.string().max(400).optional()
           .describe("Audit log reason."),
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional()
-          .describe("Token from a previous preview of this exact deletion."),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -808,7 +1034,7 @@ export function registerWriteTools(
         requirePermissions(
           perms,
           [[P.ManageMessages, "Manage Messages"]],
-          `in #${target.name}`
+          `in ${channelLabel(target)}`
         );
       }
 
@@ -820,8 +1046,8 @@ export function registerWriteTools(
         confirmToken: confirm_token,
         previewSummary:
           `Would delete a message by ` +
-          `${message.author.global_name ?? message.author.username} in ` +
-          `#${target.name}: "${excerpt}". Deletion cannot be undone.`,
+          `${quoted(message.author.global_name ?? message.author.username)} in ` +
+          `${channelLabel(target)}: ${message.content ? quoted(message.content, 120) : "(no text)"}. Deletion cannot be undone.`,
         previewDetails: {
           message_id,
           author: message.author.username,
@@ -833,13 +1059,13 @@ export function registerWriteTools(
       if (gate) return gate;
 
       await rest.delete(Routes.channelMessage(target.id, message_id), {
-        reason: reason ?? "Deleted via Omnicord",
+        reason: reason ?? "Deleted via discord-mcp",
       });
 
       return ok(
         `Deleted the message by ` +
-          `${message.author.global_name ?? message.author.username} in ` +
-          `#${target.name}.`,
+          `${quoted(message.author.global_name ?? message.author.username)} in ` +
+          `${channelLabel(target)}.`,
         { deleted: true, message_id }
       );
     })

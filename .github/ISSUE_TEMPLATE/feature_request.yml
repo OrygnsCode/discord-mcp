@@ -49,7 +49,7 @@ body:
       label: Discord API support
       description: >
         Link the Discord endpoint or feature this relies on, if you know it.
-        Omnicord can only expose what the bot API actually allows.
+        discord-mcp can only expose what the bot API actually allows.
       placeholder: 'https://discord.com/developers/docs/resources/...'
 
   - type: textarea

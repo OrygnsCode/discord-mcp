@@ -4,8 +4,7 @@
 # gates. None of it needs a Discord token; the live acceptance suite
 # stays out of CI on purpose because it requires a real test server.
 #
-# Ubuntu covers Node 20 (the minimum supported), 22, and 24 (current
-# LTS). One Windows leg and one macOS leg cover the platform-specific
+# Ubuntu covers Node 22 (the minimum supported) and 24 (current LTS). One Windows leg and one macOS leg cover the platform-specific
 # paths: the wizard's client config detection, file handling, and
 # process spawning behave differently enough there to be worth the
 # runners.
@@ -34,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node: [20, 22, 24]
+        node: [22, 24]
         include:
           - os: windows-latest
             node: 24
@@ -57,8 +56,11 @@ jobs:
       - name: Unit tests
         run: node scripts/unit.mjs
 
-      - name: Protocol smoke test
+      - name: Protocol smoke test (2025-era clients)
         run: node scripts/smoke.mjs
+
+      - name: Protocol smoke test (2026-07-28 clients)
+        run: node scripts/smoke-modern.mjs
 
       - name: HTTP transport smoke test
         run: node scripts/smoke-http.mjs

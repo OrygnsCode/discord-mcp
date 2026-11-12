@@ -2,8 +2,8 @@ import { z } from "zod";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIEmoji, APISticker, APISoundboardSound } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import {
   fetchBinary,
   fetchAudioAsDataUri,
@@ -14,6 +14,7 @@ import {
 import { resolveEmojiInput } from "../discord/emoji.js";
 import { resolveOne } from "../discord/resolve.js";
 import { gateDestructive } from "../safety.js";
+import { quoted } from "../discord/names.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -22,6 +23,7 @@ import {
   ToolProblem,
   botPermissions,
   requirePermissions,
+  confirmTokenParam,
 } from "./common.js";
 
 // Stickers and soundboard sounds. Two different upload mechanics:
@@ -108,7 +110,7 @@ async function resolveSound(
 
 export function registerExpressionTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "list_stickers",
@@ -175,10 +177,10 @@ export function registerExpressionTools(
             data: image.data,
           },
         ],
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as APISticker;
 
-      return ok(`Created the sticker "${sticker.name}".`, stickerDigest(sticker));
+      return ok(`Created the sticker ${quoted(sticker.name)}.`, stickerDigest(sticker));
     })
   );
 
@@ -216,9 +218,9 @@ export function registerExpressionTools(
           ...(description !== undefined ? { description } : {}),
           ...(tags !== undefined ? { tags } : {}),
         },
-        reason: "Updated via Omnicord",
+        reason: "Updated via discord-mcp",
       })) as APISticker;
-      return ok(`Updated the sticker "${updated.name}".`, stickerDigest(updated));
+      return ok(`Updated the sticker ${quoted(updated.name)}.`, stickerDigest(updated));
     })
   );
 
@@ -234,7 +236,7 @@ export function registerExpressionTools(
         sticker: z.string().describe("Sticker name or ID."),
         guild: guildParam,
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -254,15 +256,15 @@ export function registerExpressionTools(
         args: { sticker: found.id },
         dryRun: dry_run,
         confirmToken: confirm_token,
-        previewSummary: `Would delete the sticker "${found.name}".`,
+        previewSummary: `Would delete the sticker ${quoted(found.name)}.`,
         previewDetails: stickerDigest(found),
       });
       if (gate) return gate;
 
       await rest.delete(Routes.guildSticker(guildId, found.id), {
-        reason: "Deleted via Omnicord",
+        reason: "Deleted via discord-mcp",
       });
-      return ok(`Deleted the sticker "${found.name}".`, {
+      return ok(`Deleted the sticker ${quoted(found.name)}.`, {
         deleted: true,
         id: found.id,
       });
@@ -338,10 +340,10 @@ export function registerExpressionTools(
           ...(volume !== undefined ? { volume } : {}),
           ...emojiFields,
         },
-        reason: "Created via Omnicord",
+        reason: "Created via discord-mcp",
       })) as APISoundboardSound;
 
-      return ok(`Created the soundboard sound "${sound.name}".`, soundDigest(sound));
+      return ok(`Created the soundboard sound ${quoted(sound.name)}.`, soundDigest(sound));
     })
   );
 
@@ -379,10 +381,10 @@ export function registerExpressionTools(
             ...(name !== undefined ? { name } : {}),
             ...(volume !== undefined ? { volume } : {}),
           },
-          reason: "Updated via Omnicord",
+          reason: "Updated via discord-mcp",
         }
       )) as APISoundboardSound;
-      return ok(`Updated the sound "${updated.name}".`, soundDigest(updated));
+      return ok(`Updated the sound ${quoted(updated.name)}.`, soundDigest(updated));
     })
   );
 
@@ -398,7 +400,7 @@ export function registerExpressionTools(
         sound: z.string().describe("Sound name or ID."),
         guild: guildParam,
         dry_run: z.boolean().optional(),
-        confirm_token: z.string().optional(),
+        confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
@@ -418,15 +420,15 @@ export function registerExpressionTools(
         args: { sound: found.sound_id },
         dryRun: dry_run,
         confirmToken: confirm_token,
-        previewSummary: `Would delete the soundboard sound "${found.name}".`,
+        previewSummary: `Would delete the soundboard sound ${quoted(found.name)}.`,
         previewDetails: soundDigest(found),
       });
       if (gate) return gate;
 
       await rest.delete(Routes.guildSoundboardSound(guildId, found.sound_id), {
-        reason: "Deleted via Omnicord",
+        reason: "Deleted via discord-mcp",
       });
-      return ok(`Deleted the sound "${found.name}".`, {
+      return ok(`Deleted the sound ${quoted(found.name)}.`, {
         deleted: true,
         id: found.sound_id,
       });

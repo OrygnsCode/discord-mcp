@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { channelLabel } from "../discord/grants.js";
+import { quoted } from "../discord/names.js";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type {
   APIGuild,
@@ -7,14 +9,14 @@ import type {
   RESTGetAPIGuildMembersSearchResult,
   RESTGetAPIGuildMessagesSearchResult,
 } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import {
   getChannels,
   getRoles,
   CHANNEL_TYPE_LABELS,
 } from "../discord/guildData.js";
-import { resolveOne, type Resolvable } from "../discord/resolve.js";
+import { rankCandidates, resolveOne, type Resolvable } from "../discord/resolve.js";
 import { compareRolesLowToHigh } from "../discord/preflight.js";
 import { ok, fail } from "../envelope.js";
 import {
@@ -24,8 +26,12 @@ import {
   resolveChannel,
   resolveMember,
   memberDisplayName,
+  memberResolvable,
+  messageIdParam,
   digestMessage,
+  hiddenChannelSummary,
   TEXT_BEARING_TYPES,
+  imagesHint,
 } from "./common.js";
 
 // Read-only tools: the Phase 1 core. Everything in this file can be called
@@ -58,7 +64,7 @@ function permissionDigest(bitfield: string): string[] {
 
 export function registerReadTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "get_server_overview",
@@ -67,7 +73,9 @@ export function registerReadTools(
       description:
         "Structured snapshot of a server: identity, member counts, boost " +
         "status, channel outline grouped by category, and role count. The " +
-        "natural first call when starting work on a server.",
+        "natural first call when starting work on a server. The outline holds " +
+        "only channels the bot can see; hidden_from_bot says how many others " +
+        "exist when any do. A running pause on invites or DMs is reported too.",
       inputSchema: { guild: guildParam },
       annotations: { readOnlyHint: true },
     },
@@ -111,11 +119,28 @@ export function registerReadTools(
 
       const members = guildData.approximate_member_count ?? 0;
       const online = guildData.approximate_presence_count ?? 0;
+      const hidden = hiddenChannelSummary(rest, guildId, channels);
+
+      // A raid pause is a state of the whole server that nothing else here
+      // shows, and the tool that lifts it is not one a model guesses from
+      // "invites are not working". So a running pause is said, with the
+      // tool's name.
+      const incidents = guildData.incidents_data;
+      const running = (t?: string | null) => (t && new Date(t).getTime() > Date.now() ? new Date(t).toISOString() : null);
+      const invitesPaused = running(incidents?.invites_disabled_until);
+      const dmsPaused = running(incidents?.dms_disabled_until);
+      const paused = [
+        invitesPaused ? `new invites are paused until ${invitesPaused}` : "",
+        dmsPaused ? `DMs between members who are not friends are paused until ${dmsPaused}` : "",
+      ].filter(Boolean);
+      const flagged = Boolean(incidents?.raid_detected_at || incidents?.dm_spam_detected_at);
 
       return ok(
-        `${guildData.name}: ${members} members (${online} online), ` +
+        `${quoted(guildData.name)}: ${members} members (${online} online), ` +
           `${channels.length} channels in ${categories.length} categories, ` +
-          `${guildData.roles.length} roles, boost tier ${guildData.premium_tier}.`,
+          `${guildData.roles.length} roles, boost tier ${guildData.premium_tier}.` +
+          (hidden.count ? ` ${hidden.count} more channel(s) are hidden from the bot.` : "") +
+          (paused.length ? ` Right now ${paused.join(" and ")}; set_incident_actions changes that.` : ""),
         {
           id: guildData.id,
           name: guildData.name,
@@ -132,6 +157,17 @@ export function registerReadTools(
           role_count: guildData.roles.length,
           emoji_count: guildData.emojis.length,
           features: guildData.features.slice(0, 10),
+          ...(hidden.count === 0 ? {} : { hidden_from_bot: hidden }),
+          ...(paused.length > 0 || flagged
+            ? {
+                incidents: {
+                  invites_paused_until: invitesPaused,
+                  dms_paused_until: dmsPaused,
+                  raid_detected_at: incidents?.raid_detected_at ?? null,
+                  dm_spam_detected_at: incidents?.dm_spam_detected_at ?? null,
+                },
+              }
+            : {}),
         }
       );
     })
@@ -142,8 +178,10 @@ export function registerReadTools(
     {
       title: "List channels",
       description:
-        "All channels in a server grouped by category, with type and topic. " +
-        "Filter by type: text, voice, forum, stage, announcement, category.",
+        "The channels in a server the bot can see, grouped by category, with " +
+        "type and topic. Filter by type: text, voice, forum, stage, " +
+        "announcement, category. Channels the bot lacks View Channel on are " +
+        "left out by Discord; hidden_from_bot says how many when any are.",
       inputSchema: {
         guild: guildParam,
         type: z
@@ -184,11 +222,13 @@ export function registerReadTools(
           ...(c.topic ? { topic: c.topic } : {}),
         }));
 
+      const hidden = hiddenChannelSummary(rest, guildId, channels);
       return ok(
         `${listed.length} channel(s)` +
           (type ? ` of type ${type}` : "") +
-          ` in this server.`,
-        { channels: listed }
+          ` in this server.` +
+          (hidden.count ? ` ${hidden.count} more are hidden from the bot.` : ""),
+        { channels: listed, ...(hidden.count === 0 ? {} : { hidden_from_bot: hidden }) }
       );
     })
   );
@@ -198,29 +238,45 @@ export function registerReadTools(
     {
       title: "List roles",
       description:
-        "All roles in a server, highest first, with color, position, and a " +
-        "plain-language digest of their key permissions.",
+        "All roles in a server, highest first, with how many members hold " +
+        "each, color (and gradient), icon, position, and a plain-language " +
+        "digest of their key permissions.",
       inputSchema: { guild: guildParam },
       annotations: { readOnlyHint: true },
     },
     guarded(async ({ guild }) => {
       const { rest, guildId } = await enter(config, guild);
-      const roles = await getRoles(rest, guildId);
+      const [roles, counts] = await Promise.all([
+        getRoles(rest, guildId),
+        // Discord's own per-role counts (added December 2025). It leaves out
+        // @everyone and roles nobody holds.
+        (rest.get(Routes.guildRoleMemberCounts(guildId)) as Promise<Record<string, number>>).catch(() => undefined),
+      ]);
+      const hex = (n: number | null | undefined) => (n ? `#${n.toString(16).padStart(6, "0")}` : null);
       const listed = [...roles]
         .sort((a, b) => compareRolesLowToHigh(b, a))
         .map((r) => ({
           id: r.id,
           name: r.name,
           position: r.position,
-          color: r.color ? `#${r.color.toString(16).padStart(6, "0")}` : null,
+          ...(counts && r.id !== guildId ? { members: counts[r.id] ?? 0 } : {}),
+          color: hex(r.color),
+          ...(r.colors?.tertiary_color
+            ? { style: "holographic" }
+            : r.colors?.secondary_color
+              ? { gradient_to: hex(r.colors.secondary_color) }
+              : {}),
+          ...(r.icon ? { icon: "image" } : r.unicode_emoji ? { icon: r.unicode_emoji } : {}),
           hoisted: r.hoist,
           mentionable: r.mentionable,
           managed: r.managed,
           key_permissions: permissionDigest(r.permissions),
         }));
-      return ok(`${listed.length} role(s), listed highest first.`, {
-        roles: listed,
-      });
+      return ok(
+        `${listed.length} role(s), listed highest first.`,
+        { roles: listed },
+        counts ? [] : ["Member counts per role were not available."]
+      );
     })
   );
 
@@ -231,13 +287,14 @@ export function registerReadTools(
       description:
         "Recent messages from a channel as a digest: author, time, content, " +
         "attachments, reactions, and resolved reply references. Returns " +
-        "oldest first. Use next_before to page further back.",
+        "oldest first. Use next_before to page further back. To look at a " +
+        "message's pictures, use get_message with include_images.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
         limit: z.number().int().min(1).max(100).optional()
           .describe("How many messages, 1 to 100. Default 25."),
-        before: z.string().optional()
+        before: messageIdParam.optional()
           .describe("Message ID cursor: only messages older than this."),
       },
       annotations: { readOnlyHint: true },
@@ -264,9 +321,10 @@ export function registerReadTools(
 
       return ok(
         digests.length === 0
-          ? `#${target.name} has no messages in this range.`
-          : `Read ${digests.length} message(s) from #${target.name}` +
-              ` spanning ${oldest} to ${newest}.`,
+          ? `${channelLabel(target)} has no messages in this range.`
+          : `Read ${digests.length} message(s) from ${channelLabel(target)}` +
+              ` spanning ${oldest} to ${newest}.` +
+              imagesHint(messages),
         {
           channel: { id: target.id, name: target.name },
           messages: digests,
@@ -392,7 +450,7 @@ export function registerReadTools(
           channel: { id: m.channel_id, name: channelName.get(m.channel_id) ?? null },
         }));
 
-      const scope = channelInfo ? `#${channelInfo.name}` : "the server";
+      const scope = channelInfo ? `${channelLabel(channelInfo)}` : "the server";
       const warnings: string[] = [];
       if (result.doing_deep_historical_index) {
         warnings.push(
@@ -451,11 +509,11 @@ export function registerReadTools(
       let members: APIGuildMember[] = [];
       const warnings: string[] = [];
 
-      if (query) {
-        members = (await rest.get(Routes.guildMembersSearch(guildId), {
-          query: new URLSearchParams({ query, limit: String(max) }),
-        })) as RESTGetAPIGuildMembersSearchResult;
-      } else if (role) {
+      // The role is worked out first, because it narrows a name search too.
+      // Given both, only the name used to be searched, and the result still
+      // said the members found held the role.
+      let wantedRole: { id: string; name: string } | undefined;
+      if (role) {
         const roles = await getRoles(rest, guildId);
         const resolution = resolveOne(
           role,
@@ -466,6 +524,20 @@ export function registerReadTools(
             candidates: "candidates" in resolution ? resolution.candidates : [],
           });
         }
+        wantedRole = { id: resolution.match.id, name: resolution.match.name };
+      }
+      // Everyone holds @everyone, and members do not list it among their roles.
+      const holds = (m: APIGuildMember) =>
+        wantedRole === undefined || wantedRole.id === guildId || m.roles.includes(wantedRole.id);
+
+      if (query) {
+        // With a role as well, more names are asked for than will be listed,
+        // since most of them may not hold it.
+        const found = (await rest.get(Routes.guildMembersSearch(guildId), {
+          query: new URLSearchParams({ query, limit: wantedRole ? "1000" : String(max) }),
+        })) as RESTGetAPIGuildMembersSearchResult;
+        members = found.filter(holds).slice(0, max);
+      } else if (wantedRole) {
         // Walk the member list. Capped at 3 pages (3000 members) to stay
         // polite; the warning says so when the cap bites.
         let after: string | undefined;
@@ -476,7 +548,7 @@ export function registerReadTools(
             query: params,
           })) as APIGuildMember[];
           for (const m of batch) {
-            if (m.roles.includes(resolution.match.id)) members.push(m);
+            if (holds(m)) members.push(m);
           }
           if (batch.length < 1000) {
             after = undefined;
@@ -486,8 +558,7 @@ export function registerReadTools(
         }
         if (after) {
           warnings.push(
-            "Stopped after scanning 3000 members; larger servers need " +
-              "paging support that lands in a later phase."
+            "Stopped after looking through 3000 members; holders who joined later are not included."
           );
         }
         members = members.slice(0, max);
@@ -505,7 +576,7 @@ export function registerReadTools(
       return ok(
         `Found ${listed.length} member(s)` +
           (query ? ` matching "${query}"` : "") +
-          (role ? ` holding role "${role}"` : "") +
+          (wantedRole ? ` holding the role ${quoted(wantedRole.name)}` : "") +
           ".",
         { members: listed },
         warnings
@@ -541,7 +612,7 @@ export function registerReadTools(
         new Date(member.communication_disabled_until) > new Date();
 
       return ok(
-        `${memberDisplayName(member)} (${member.user.username}): ` +
+        `${quoted(memberDisplayName(member))} (${quoted(member.user.username)}): ` +
           `${roleNames.length} role(s), joined ${member.joined_at}` +
           (timedOut ? ", currently timed out." : "."),
         {
@@ -609,25 +680,34 @@ export function registerReadTools(
       }
       if (wanted.has("member") && !/^\d{17,20}$/.test(query.trim())) {
         const found = (await rest.get(Routes.guildMembersSearch(guildId), {
-          query: new URLSearchParams({ query, limit: "10" }),
+          query: new URLSearchParams({ query: query.trim(), limit: "25" }),
         })) as RESTGetAPIGuildMembersSearchResult;
         for (const m of found) {
-          if (!m.user) continue;
-          pool.push({
-            id: m.user.id,
-            name: m.user.username,
-            type: "member",
-            context: memberDisplayName(m),
-          });
+          if (m.user) pool.push(memberResolvable(m));
         }
       }
 
-      const resolution = resolveOne(query, pool);
+      // One clear winner is the answer, unless it is a person and a second
+      // person carries the name just as exactly: then both are shown.
+      const ranked = rankCandidates(query, pool);
+      const namesakes = ranked.filter((c) => c.type === "member" && c.score >= 80);
+      const first = resolveOne(query, pool);
+      const resolution: typeof first =
+        "match" in first && first.match.type === "member" && namesakes.length > 1
+          ? { candidates: ranked.slice(0, 5) }
+          : first;
+      const shown = (c: (typeof ranked)[number]) => {
+        const { aliases: _aliases, ...rest } = c;
+        return rest;
+      };
       if ("match" in resolution) {
         return ok(
           `"${query}" resolves to ${resolution.match.type} ` +
-            `${resolution.match.name} (${resolution.match.id}).`,
-          { match: resolution.match }
+            // A member is named as they show, with the username beside it.
+            (resolution.match.type === "member" && resolution.match.context && resolution.match.context !== resolution.match.name
+              ? `${quoted(resolution.match.context)} (username ${quoted(resolution.match.name)}, ${resolution.match.id}).`
+              : `${quoted(resolution.match.name)} (${resolution.match.id}).`),
+          { match: shown(resolution.match) }
         );
       }
       if (resolution.candidates.length === 0) {
@@ -638,7 +718,7 @@ export function registerReadTools(
       return ok(
         `${resolution.candidates.length} candidate(s) for "${query}". ` +
           "Pick one by ID.",
-        { candidates: resolution.candidates }
+        { candidates: resolution.candidates.map(shown) }
       );
     })
   );

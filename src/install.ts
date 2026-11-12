@@ -1,10 +1,10 @@
 import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 
-// Where the running copy of Omnicord lives, and moving it somewhere that
+// Where the running copy of this server lives, and moving it somewhere that
 // lasts.
 //
-// `npx @orygn/omnicord init` runs the wizard out of npm's npx cache, a
+// `npx @orygn/discord-mcp init` runs the wizard out of npm's npx cache, a
 // folder npm treats as disposable: `npm cache npx rm` empties it, and so
 // does deleting the npm cache folder or a disk cleanup tool. The wizard
 // used to register that path with the AI client as-is, so the client
@@ -26,7 +26,7 @@ export function inNpxCache(path: string): boolean {
 }
 
 // npm exec, which is what npx runs, marks every process it starts with
-// npm_command=exec. A client configured with `npx -y @orygn/omnicord`
+// npm_command=exec. A client configured with `npx -y @orygn/discord-mcp`
 // therefore runs from the cache legitimately: npx reinstalls there on
 // demand. Only a config naming the cached file directly is fragile.
 export function launchedByNpx(env: NodeJS.ProcessEnv): boolean {
@@ -41,11 +41,11 @@ export function npxCacheWarning(
 ): string | undefined {
   if (!inNpxCache(packageRoot) || launchedByNpx(env)) return undefined;
   return (
-    `Omnicord is running from npm's npx cache (${packageRoot}), which npm ` +
+    `discord-mcp is running from npm's npx cache (${packageRoot}), which npm ` +
     "does not keep. When that folder is cleared, your AI client will fail " +
-    'to start Omnicord and show "Server disconnected". Run ' +
-    "`npx @orygn/omnicord@latest init` and choose to re-register, which " +
-    "moves Omnicord to a permanent folder."
+    'to start it and show "Server disconnected". Run ' +
+    "`npx @orygn/discord-mcp@latest init` and choose to re-register, which " +
+    "moves it to a permanent folder."
   );
 }
 

@@ -4,10 +4,12 @@ import type {
   APIGuildMember,
   RESTGetAPICurrentUserGuildsResult,
 } from "discord-api-types/v10";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { OmnicordConfig } from "../config.js";
+import type { McpServer } from "@modelcontextprotocol/server";
+import type { ServerConfig } from "../config.js";
 import { getRoles } from "../discord/guildData.js";
 import { getRestForToken, NoTokenError } from "../discord/client.js";
+import { chooseSharedBot } from "../discord/botRouting.js";
+import { quoted } from "../discord/names.js";
 import { resolveOne } from "../discord/resolve.js";
 import { ok, fail } from "../envelope.js";
 import { enter, guarded, guildParam, memberDisplayName } from "./common.js";
@@ -16,9 +18,13 @@ import { enter, guarded, guildParam, memberDisplayName } from "./common.js";
 // members holding a role. search_members covers name and filter search;
 // these cover the plain enumerations.
 
+// How many pages of 1000 members get_role_members reads while looking for
+// holders to list.
+const MAX_MEMBER_PAGES = 3;
+
 export function registerRosterTools(
   server: McpServer,
-  config: OmnicordConfig
+  config: ServerConfig
 ): void {
   server.registerTool(
     "list_servers",
@@ -26,9 +32,10 @@ export function registerRosterTools(
       title: "List servers",
       description:
         "Every server your bots are in, each labeled with which bot reaches " +
-        "it, with approximate member counts. When more than one bot is " +
-        "configured this is the map for choosing which one acts. Use " +
-        "get_server_overview for one server's full detail.",
+        "it, with approximate member counts. A server more than one of your " +
+        "bots is in appears once per bot, with handles_server marking the " +
+        "one that tools run as there. Use get_server_overview for one " +
+        "server's full detail.",
       annotations: { readOnlyHint: true },
     },
     guarded(async () => {
@@ -65,7 +72,29 @@ export function registerRosterTools(
           bot: bot.name,
         }))
       );
-      const uniqueServers = new Set(servers.map((s) => s.id)).size;
+      // A server several bots are in: say which of them tools run as there,
+      // by the same rule the tools themselves follow.
+      const botsIn = new Map<string, string[]>();
+      for (const s of servers) botsIn.set(s.id, [...(botsIn.get(s.id) ?? []), s.bot]);
+      const prefer = { defaultBot: config.bots.find((b) => b.isDefault)?.name, byServer: config.serverBots };
+      const sharedNotes: string[] = [];
+      const listed = servers.map((s) => {
+        const bots = botsIn.get(s.id) ?? [];
+        if (bots.length < 2) return s;
+        const chosen = chooseSharedBot(bots, s.id, prefer);
+        if (s.bot === bots[0]) {
+          sharedNotes.push(
+            `${bots.length} of your bots are in ${quoted(s.name)} (${bots.join(", ")}). ` +
+              (chosen
+                ? `Tools run as ${chosen.botName} there: ` +
+                  (chosen.why === "configured" ? "bots.json gives it that server." : "it is the default bot.")
+                : `Nothing says which should handle it, so tools refuse there until bots.json does: ` +
+                  `"servers": { "${s.id}": "${bots[0]}" }.`)
+          );
+        }
+        return { ...s, handles_server: chosen?.botName === s.bot };
+      });
+      const uniqueServers = botsIn.size;
       const unreachable = perBot
         .filter((p) => !p.reachable)
         .map((p) => p.bot.name);
@@ -88,9 +117,9 @@ export function registerRosterTools(
           reachable:
             perBot.find((p) => p.bot.name === b.name)?.reachable ?? false,
         })),
-        servers,
+        servers: listed,
         ...(unreachable.length ? { unreachable } : {}),
-      });
+      }, sharedNotes);
     })
   );
 
@@ -155,33 +184,68 @@ export function registerRosterTools(
         });
       }
       const roleId = resolution.match.id;
+      const name = resolution.match.name;
+      const max = limit ?? 50;
+      // Everyone holds @everyone, and members do not list it among their roles.
+      const everyone = roleId === guildId;
+
+      // How many hold it, from Discord's own count. The number of holders
+      // found while looking for enough to list is not that: it stops early,
+      // and it used to be reported as the total.
+      let total: number | undefined;
+      if (!everyone) {
+        try {
+          const counts = (await rest.get(Routes.guildRoleMemberCounts(guildId))) as Record<string, number>;
+          total = counts[roleId] ?? 0;
+        } catch {
+          total = undefined;
+        }
+      }
 
       const holders: APIGuildMember[] = [];
       let after: string | undefined;
-      const max = limit ?? 50;
-      for (let page = 0; page < 3 && holders.length < max; page += 1) {
+      let seen = 0;
+      let reachedEnd = false;
+      const enough = () => holders.length >= max || (total !== undefined && holders.length >= total);
+      for (let page = 0; page < MAX_MEMBER_PAGES && !enough() && !reachedEnd; page += 1) {
         const params = new URLSearchParams({ limit: "1000" });
         if (after) params.set("after", after);
         const batch = (await rest.get(Routes.guildMembers(guildId), {
           query: params,
         })) as APIGuildMember[];
+        seen += batch.length;
         for (const m of batch) {
-          if (m.roles.includes(roleId)) holders.push(m);
+          if (everyone || m.roles.includes(roleId)) holders.push(m);
         }
-        if (batch.length < 1000) break;
+        if (batch.length < 1000) reachedEnd = true;
         after = batch[batch.length - 1]?.user?.id;
       }
 
+      const listed = holders.slice(0, max);
+      const known = total ?? (reachedEnd && !everyone ? holders.length : undefined);
+      // Looked through as many members as it will, without reaching the
+      // end or enough holders: some are missing from the list.
+      const cutShort = !reachedEnd && !enough();
+      const summary = everyone
+        ? `Every member holds @everyone. Listing ${listed.length}; list_members pages through all of them.`
+        : known !== undefined
+          ? `${known} member(s) hold ${quoted(name)}.` + (listed.length < known ? ` Listing ${listed.length}.` : "")
+          : `At least ${holders.length} member(s) hold ${quoted(name)}; the count could not be read.` +
+            (listed.length < holders.length ? ` Listing ${listed.length}.` : "");
       return ok(
-        `${holders.length} member(s) hold ${resolution.match.name}.`,
+        summary,
         {
-          role: { id: roleId, name: resolution.match.name },
-          members: holders.slice(0, max).map((m) => ({
+          role: { id: roleId, name },
+          ...(known !== undefined ? { total: known } : {}),
+          members: listed.map((m) => ({
             id: m.user?.id,
             name: m.user?.username,
             display_name: memberDisplayName(m),
           })),
-        }
+        },
+        cutShort
+          ? [`Only the first ${seen} members of the server were looked through, so holders who joined later are not listed.`]
+          : []
       );
     })
   );

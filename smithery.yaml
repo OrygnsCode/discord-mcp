@@ -1,12 +1,12 @@
-# Smithery configuration for @orygn/omnicord.
+# Smithery configuration for @orygn/discord-mcp.
 #
 # Distribution model: local stdio MCPB bundle. Smithery distributes the
 # pre-built .mcpb file; clients download and run it locally. The bot token
 # never leaves the user's machine.
 #
 # Publishing:
-#   npx @anthropic-ai/mcpb pack mcpb omnicord.mcpb
-#   npx @smithery/cli mcp publish ./omnicord.mcpb -n @orygn/omnicord
+#   npx @anthropic-ai/mcpb pack mcpb discord-mcp.mcpb
+#   npx @smithery/cli mcp publish ./discord-mcp.mcpb -n @orygn/discord-mcp
 #
 # See: https://smithery.ai/docs/build/publish
 runtime: typescript
@@ -46,7 +46,7 @@ startCommand:
       args: ['dist/index.js'],
       env: {
         DISCORD_TOKEN: config.discordToken,
-        OMNICORD_GUILD: config.guild,
-        OMNICORD_SAFE_MODE: config.safeMode === false ? 'false' : 'true'
+        DISCORD_MCP_GUILD: config.guild,
+        DISCORD_MCP_SAFE_MODE: config.safeMode === false ? 'false' : 'true'
       }
     })

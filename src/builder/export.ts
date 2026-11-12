@@ -6,6 +6,7 @@ import {
   type RoleLite,
 } from "../discord/preflight.js";
 import type { Blueprint, BlueprintChannel } from "./blueprint.js";
+import { gateBitsForType, managedBits, readSugar } from "./overwrites.js";
 
 // Snapshot a live server into a blueprint: the inverse of the build
 // executor. Permission overwrites get decompiled back into the
@@ -19,12 +20,6 @@ const P = PermissionFlagsBits;
 // Discord's own limit on a role name.
 const ROLE_NAME_MAX = 100;
 
-const SEND_FAMILY =
-  P.SendMessages |
-  P.SendMessagesInThreads |
-  P.CreatePublicThreads |
-  P.CreatePrivateThreads;
-
 const TYPE_NAMES: Record<number, BlueprintChannel["type"]> = {
   0: "text",
   2: "voice",
@@ -34,10 +29,15 @@ const TYPE_NAMES: Record<number, BlueprintChannel["type"]> = {
 };
 
 interface Visibility {
+  // Whether @everyone is denied View Channel. Private with no roles listed
+  // means only admins can see it.
+  private: boolean;
   privateTo: string[];
   readOnly: boolean;
   postingRoles: string[];
   leftovers: boolean;
+  // Each role's bits outside privacy and read-only, by role id.
+  extras: Map<string, { name: string; allow: bigint; deny: bigint }>;
 }
 
 function setEquals(a: string[], b: string[]): boolean {
@@ -46,71 +46,108 @@ function setEquals(a: string[], b: string[]): boolean {
   return b.every((x) => lower.has(x.toLowerCase()));
 }
 
-// Decompiles one channel's overwrites into the sugar. The bot's own
-// member overwrite is the executor's self-allow and is ignored; other
-// member overwrites and unexpected bits flag the leftovers warning.
+function sameOverwrites(a: GuildChannelLite, b: GuildChannelLite): boolean {
+  const key = (c: GuildChannelLite) =>
+    (c.permission_overwrites ?? []).map((o) => `${o.id}:${o.type}:${o.allow}:${o.deny}`).sort().join("|");
+  return key(a) === key(b);
+}
+
+function sameVisibility(a: Visibility, b: Visibility): boolean {
+  return a.private === b.private && (!a.private || setEquals(a.privateTo, b.privateTo));
+}
+
+// Decompiles one channel's overwrites into the sugar, with the same reading
+// the planner uses (readSugar). The bot's own member overwrite is the
+// build's self-allow and is ignored; anything else the sugar cannot carry
+// (member overwrites, other bits, a role allowed in where nothing denies)
+// flags the leftovers warning, since a rebuild would drop it.
 function readVisibility(
   channel: GuildChannelLite,
   guildId: string,
   roleNames: Map<string, string>,
   botUserId: string | undefined
 ): Visibility {
+  const overwrites = channel.permission_overwrites ?? [];
+  const sugar = readSugar(overwrites, guildId);
+  // The bits privacy and read-only control here; everything else a role
+  // has is an extra, exported in `permissions`.
+  const managed = managedBits(overwrites, guildId, gateBitsForType(channel.type));
   const out: Visibility = {
+    private: sugar.private,
     privateTo: [],
-    readOnly: false,
+    readOnly: sugar.readOnly,
     postingRoles: [],
     leftovers: false,
+    extras: new Map(),
   };
-  const overwrites = channel.permission_overwrites ?? [];
-  const gateBits =
-    channel.type === 2 || channel.type === 13 || channel.type === 4
-      ? P.ViewChannel | P.Connect
-      : P.ViewChannel;
 
   for (const ow of overwrites) {
     const allow = BigInt(ow.allow);
     const deny = BigInt(ow.deny);
 
+    // The build's own self-allow is not part of the design. Any other
+    // member's overwrite cannot be named in a blueprint.
     if (ow.type === 1) {
       if (botUserId && ow.id === botUserId) continue;
       out.leftovers = true;
       continue;
     }
 
-    if (ow.id === guildId) {
-      const knownDeny = gateBits | SEND_FAMILY;
-      if ((deny & ~knownDeny) !== 0n || allow !== 0n) out.leftovers = true;
-      if ((deny & SEND_FAMILY) !== 0n) out.readOnly = true;
-      continue;
-    }
-
-    const name = roleNames.get(ow.id);
+    const name = ow.id === guildId ? "@everyone" : roleNames.get(ow.id);
     if (!name) {
+      // A role an integration manages, which a blueprint does not define.
       out.leftovers = true;
       continue;
     }
-    const knownAllow = gateBits | P.SendMessages | P.SendMessagesInThreads;
-    if ((allow & ~knownAllow) !== 0n || deny !== 0n) out.leftovers = true;
-    if ((allow & P.ViewChannel) !== 0n) out.privateTo.push(name);
-    if ((allow & P.SendMessages) !== 0n) out.postingRoles.push(name);
+    if (ow.id !== guildId) {
+      // A role denied something privacy or read-only controls (a muted role
+      // in a read-only channel, say) has no place in the sugar.
+      if ((deny & managed) !== 0n) out.leftovers = true;
+      if (sugar.private && (allow & P.ViewChannel) !== 0n) out.privateTo.push(name);
+      if (sugar.readOnly && (allow & P.SendMessages) !== 0n) out.postingRoles.push(name);
+    } else if ((allow & managed) !== 0n) {
+      out.leftovers = true;
+    }
+    const extraAllow = allow & ~managed;
+    const extraDeny = deny & ~managed;
+    if (extraAllow !== 0n || extraDeny !== 0n) {
+      out.extras.set(ow.id, { name, allow: extraAllow, deny: extraDeny });
+    }
   }
-
-  // private_to only means something when everyone is actually denied view.
-  const everyone = overwrites.find((o) => o.type === 0 && o.id === guildId);
-  if (!everyone || (BigInt(everyone.deny) & P.ViewChannel) === 0n) {
-    out.privateTo = [];
-  }
-  if (!out.readOnly) out.postingRoles = [];
   return out;
+}
+
+function extrasList(
+  vis: Visibility,
+  alsoClear: Visibility | undefined
+): Array<{ role: string; allow?: string[]; deny?: string[] }> {
+  const list: Array<{ role: string; allow?: string[]; deny?: string[] }> = [];
+  for (const x of vis.extras.values()) {
+    list.push({
+      role: x.name,
+      ...(x.allow ? { allow: describePermissions(x.allow) } : {}),
+      ...(x.deny ? { deny: describePermissions(x.deny) } : {}),
+    });
+  }
+  // A channel built inside a category starts from the category's settings,
+  // so a role with extras there but none here is listed empty, which clears
+  // them; otherwise a rebuild would give it the category's.
+  for (const [id, x] of alsoClear?.extras ?? []) {
+    if (!vis.extras.has(id)) list.push({ role: x.name });
+  }
+  return list.sort((a, b) => a.role.localeCompare(b.role));
 }
 
 export function exportBlueprint(
   channels: GuildChannelLite[],
   roles: RoleLite[],
   guildId: string,
-  options: { botUserId?: string; name?: string } = {}
+  options: { botUserId?: string; name?: string; includeIds?: boolean } = {}
 ): { blueprint: Blueprint; warnings: string[] } {
   const warnings: string[] = [];
+  // Ids let an edited export rename things instead of creating new ones.
+  // A blueprint meant for other servers can leave them out.
+  const withId = (id: string) => (options.includeIds === false ? {} : { id });
 
   // Roles the blueprint will actually define: everything except @everyone
   // and integration-managed ones, highest first. That is the order the
@@ -142,7 +179,8 @@ export function exportBlueprint(
     if (candidate !== base) {
       warnings.push(
         `More than one role is named "${base}"; exported the lower one as ` +
-          `"${candidate}" so channel permissions can tell them apart.`
+          `"${candidate}" so channel permissions can tell them apart. Applying ` +
+          "this export with update_existing renames it to match."
       );
     }
     taken.add(candidate.toLowerCase());
@@ -160,6 +198,7 @@ export function exportBlueprint(
       mentionable?: boolean;
     };
     return {
+      ...withId(r.id),
       name: roleNames.get(r.id) as string,
       permissions: describePermissions(BigInt(r.permissions)),
       ...(extra.color
@@ -175,7 +214,8 @@ export function exportBlueprint(
 
   function exportChannel(
     c: GuildChannelLite,
-    parentVisibility?: Visibility
+    parentVisibility?: Visibility,
+    parent?: GuildChannelLite
   ): BlueprintChannel | null {
     const typeName = TYPE_NAMES[c.type];
     if (!typeName) {
@@ -192,13 +232,22 @@ export function exportBlueprint(
           "blueprint's visibility model; captured approximately."
       );
     }
-    // A child whose privacy matches its category is synced; the
-    // blueprint expresses that by leaving the child unmarked.
+    // A child whose privacy matches its category's is left unmarked, which
+    // is how a blueprint says "follows the category". One that differs says
+    // so: its roles, [] for admins only, or null for a public channel in a
+    // private category, which unmarked would make private on a rebuild.
     const inheritsPrivacy =
-      parentVisibility !== undefined &&
-      setEquals(vis.privateTo, parentVisibility.privateTo);
+      parentVisibility !== undefined && sameVisibility(vis, parentVisibility);
+    const privacy = inheritsPrivacy
+      ? {}
+      : vis.private
+        ? { private_to: vis.privateTo }
+        : parentVisibility?.private
+          ? { private_to: null }
+          : {};
 
     return {
+      ...withId(c.id),
       name: c.name ?? "unnamed",
       ...(typeName !== "text" ? { type: typeName } : {}),
       ...(c.topic && c.type !== 2 && c.type !== 13 ? { topic: c.topic } : {}),
@@ -206,11 +255,16 @@ export function exportBlueprint(
         ? { slowmode_seconds: c.rate_limit_per_user }
         : {}),
       ...(c.nsfw ? { nsfw: true } : {}),
-      ...(vis.privateTo.length > 0 && !inheritsPrivacy
-        ? { private_to: vis.privateTo }
-        : {}),
+      ...privacy,
       ...(vis.readOnly ? { read_only: true } : {}),
       ...(vis.postingRoles.length > 0 ? { posting_roles: vis.postingRoles } : {}),
+      ...(() => {
+        // A channel synced to its category (the same overwrites exactly)
+        // follows it, extras included, and says nothing of its own.
+        if (parent && sameOverwrites(c, parent)) return {};
+        const list = extrasList(vis, parentVisibility);
+        return list.length > 0 ? { permissions: list } : {};
+      })(),
     };
   }
 
@@ -226,12 +280,14 @@ export function exportBlueprint(
         );
       }
       return {
+        ...withId(cat.id),
         name: cat.name ?? "unnamed",
-        ...(catVis.privateTo.length > 0 ? { private_to: catVis.privateTo } : {}),
+        ...(catVis.private ? { private_to: catVis.privateTo } : {}),
+        ...(catVis.extras.size > 0 ? { permissions: extrasList(catVis, undefined) } : {}),
         channels: channels
           .filter((c) => c.parent_id === cat.id)
           .sort(byPosition)
-          .map((c) => exportChannel(c, catVis))
+          .map((c) => exportChannel(c, catVis, cat))
           .filter((c): c is BlueprintChannel => c !== null),
       };
     });
