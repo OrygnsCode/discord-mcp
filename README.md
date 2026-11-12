@@ -4,7 +4,7 @@ Discord server management MCP for AI agents. Formerly Omnicord.
 
 [![CI](https://github.com/OrygnsCode/discord-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/OrygnsCode/discord-mcp/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/%40orygn%2Fdiscord-mcp)](https://www.npmjs.com/package/@orygn/discord-mcp)
-[![Glama score](https://glama.ai/mcp/servers/OrygnsCode/Omnicord/badges/score.svg)](https://glama.ai/mcp/servers/OrygnsCode/Omnicord)
+[![Glama score](https://glama.ai/mcp/servers/OrygnsCode/discord-mcp/badges/score.svg)](https://glama.ai/mcp/servers/OrygnsCode/discord-mcp)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](package.json)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-8A2BE2)](docs/clients.md)
