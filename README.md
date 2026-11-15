@@ -18,6 +18,8 @@ You describe what you want. Your AI decides how to do it. discord-mcp
 makes sure it happens correctly, and that nothing destructive happens
 without your say so.
 
+[![One prompt builds a whole Discord server (1 minute demo)](https://img.youtube.com/vi/_1WtB3euR1U/maxresdefault.jpg)](https://www.youtube.com/watch?v=_1WtB3euR1U)
+
 ## How it works
 
 Your AI client (Claude Desktop, Cursor, Windsurf, Claude Code, or any
@@ -47,11 +49,7 @@ node dist/index.js init
 
 Prefer to watch? Here is the full setup, start to finish:
 
-[![Setup walkthrough](https://img.youtube.com/vi/Qk0lY5PGHSE/hqdefault.jpg)](https://www.youtube.com/watch?v=Qk0lY5PGHSE)
-
-This walkthrough is a little dated now and still shows the old name,
-Omnicord, but the core steps still apply. A fuller, updated walkthrough is
-planned.
+[![Setup walkthrough](https://img.youtube.com/vi/vYAdzxzLKWY/maxresdefault.jpg)](https://www.youtube.com/watch?v=vYAdzxzLKWY)
 
 The wizard goes from a bare Discord application to a working setup in
 about a minute. It takes the bot token with input hidden, verifies it

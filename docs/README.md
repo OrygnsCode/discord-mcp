@@ -1,9 +1,7 @@
 # discord-mcp documentation
 
-Video: the [setup walkthrough](https://www.youtube.com/watch?v=Qk0lY5PGHSE)
-covers installation from a blank machine, start to finish. It is a little
-dated now, but the core steps still apply, and a fuller updated walkthrough
-is planned.
+Video: the [setup walkthrough](https://www.youtube.com/watch?v=vYAdzxzLKWY)
+covers installation and first use, start to finish.
 
 - [Getting started](getting-started.md): from nothing to a working setup,
   with the wizard or by hand.

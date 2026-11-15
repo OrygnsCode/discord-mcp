@@ -23,11 +23,9 @@ The quickest path is npx, which needs no clone:
 npx @orygn/discord-mcp init
 ```
 
-Prefer to follow along on video? The full setup walkthrough, from a blank
-machine to a working install, is here:
-https://www.youtube.com/watch?v=Qk0lY5PGHSE
-It is a little dated now, but the core steps still apply, and a fuller
-updated walkthrough is planned.
+Prefer to follow along on video? The full setup walkthrough, from the
+setup command to your first server build, is here:
+https://www.youtube.com/watch?v=vYAdzxzLKWY
 
 To run from source instead (or to develop against it):
 
