@@ -384,8 +384,8 @@ export function buildPlan(
     ...categories.flatMap((c) => c.channels),
   ];
   // A permissions list is written as overwrites, and overwrites need
-  // Manage Roles as much as privacy does. Left out, a bot without it passed
-  // planning and failed on the first such channel, mid-build.
+  // Manage Roles as much as privacy does. Left out, a bot without it would
+  // pass planning and fail on the first such channel, mid-build.
   const needsRoles =
     roles.length > 0 ||
     allBpChannels.some(

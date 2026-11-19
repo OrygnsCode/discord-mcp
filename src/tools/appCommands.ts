@@ -11,6 +11,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import type { ServerConfig } from "../config.js";
 import { gateDestructive } from "../safety.js";
 import { ok, fail } from "../envelope.js";
+import { settingSource } from "../settings.js";
 import { enter, enterBot, guarded, guildParam, botParam, ToolProblem, confirmTokenParam } from "./common.js";
 
 // Slash commands belong to the Discord application, not to a server, so these
@@ -98,11 +99,22 @@ async function applicationId(rest: REST): Promise<string> {
 async function scope(
   config: ServerConfig,
   guild: string | undefined,
-  bot: string | undefined
+  bot: string | undefined,
+  changes = false
 ): Promise<{ rest: REST; guildId?: string; where: string }> {
   if (guild) {
     const entered = await enter(config, guild, bot);
     return { rest: entered.rest, guildId: entered.guildId, where: entered.guildName };
+  }
+  // A global command shows up in every server the bot is in, so an install
+  // kept to some servers does not change one.
+  if (changes && config.allowedServers) {
+    throw new ToolProblem(
+      fail(
+        `A global command would show up in every server the bot is in, and this install may act only in the servers in ` +
+          `${settingSource("ALLOWED_SERVERS")}. Pass guild to change a command in one of them. Nothing was done.`
+      )
+    );
   }
   const { rest } = enterBot(config, bot);
   return { rest, where: "globally" };
@@ -194,7 +206,7 @@ export function registerAppCommandTools(server: McpServer, config: ServerConfig)
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     guarded(async ({ name, description, options, guild, bot }) => {
-      const { rest, guildId, where } = await scope(config, guild, bot);
+      const { rest, guildId, where } = await scope(config, guild, bot, true);
       const appId = await applicationId(rest);
       const clean = name.trim().replace(/^\//, "").toLowerCase();
       const created = (await rest.post(commandsRoute(appId, guildId), {
@@ -231,7 +243,7 @@ export function registerAppCommandTools(server: McpServer, config: ServerConfig)
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     guarded(async ({ command, description, options, guild, bot }) => {
-      const { rest, guildId, where } = await scope(config, guild, bot);
+      const { rest, guildId, where } = await scope(config, guild, bot, true);
       const appId = await applicationId(rest);
       const found = await resolveCommand(rest, appId, guildId, command);
 
@@ -273,7 +285,7 @@ export function registerAppCommandTools(server: McpServer, config: ServerConfig)
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     guarded(async ({ command, guild, bot, dry_run, confirm_token }) => {
-      const { rest, guildId, where } = await scope(config, guild, bot);
+      const { rest, guildId, where } = await scope(config, guild, bot, true);
       const appId = await applicationId(rest);
       const found = await resolveCommand(rest, appId, guildId, command);
 

@@ -1,0 +1,15 @@
+{
+  "name": "discord-mcp-telemetry",
+  "private": true,
+  "type": "module",
+  "description": "Receiver for discord-mcp's anonymous usage stats (Cloudflare Worker + D1).",
+  "scripts": {
+    "test": "node test/worker.test.mjs",
+    "dev": "wrangler dev --local",
+    "migrate": "wrangler d1 migrations apply discord-mcp-telemetry --remote",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.165.0"
+  }
+}

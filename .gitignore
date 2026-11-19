@@ -4,11 +4,10 @@ dist/
 .env.*
 bots.json
 *.log
-.claude/
 .mcp.json
 .DS_Store
-.demo-build.json
 .omnicord/
 .discord-mcp/
-omnicord-video-script.md
 *.tgz
+.wrangler/
+*.mcpb

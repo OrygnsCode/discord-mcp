@@ -1,10 +1,10 @@
 {
-  "manifest_version": "0.2",
+  "manifest_version": "0.3",
   "name": "discord-mcp",
   "display_name": "Discord MCP",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Discord server management MCP for AI agents: chat, moderation, admin, and full server building.",
-  "long_description": "Discord MCP gives an AI assistant full operational control of a Discord server through your own bot: 164 tools covering chat, moderation, automod, events, and administration, up to building out a complete community server from a one paragraph brief. Destructive actions never execute on the first call; they return a preview and require explicit confirmation, enforced by the server itself rather than the model.",
+  "long_description": "Discord MCP gives an AI assistant full operational control of a Discord server through your own bot: 164 tools covering chat, moderation, automod, events, and administration, up to building out a complete community server from a one paragraph brief. Destructive actions never execute on the first call; they return a preview first.",
   "author": {
     "name": "Orygn LLC",
     "url": "https://orygn.tech"
@@ -15,7 +15,17 @@
   },
   "homepage": "https://github.com/OrygnsCode/discord-mcp",
   "documentation": "https://github.com/OrygnsCode/discord-mcp/tree/main/docs",
+  "support": "https://github.com/OrygnsCode/discord-mcp/issues",
+  "icon": "icon-light.png",
+  "icons": [
+    { "src": "icon-light.png", "size": "512x512", "theme": "light" },
+    { "src": "icon-dark.png", "size": "512x512", "theme": "dark" }
+  ],
   "license": "Apache-2.0",
+  "privacy_policies": [
+    "https://github.com/OrygnsCode/discord-mcp/blob/main/docs/privacy.md",
+    "https://discord.com/privacy"
+  ],
   "keywords": ["discord", "discord-mcp", "moderation", "server-builder", "community", "automod"],
   "server": {
     "type": "node",
@@ -25,23 +35,51 @@
       "args": ["${__dirname}/dist/index.js"],
       "env": {
         "DISCORD_TOKEN": "${user_config.discord_token}",
-        "DISCORD_MCP_GUILD": "${user_config.guild}"
+        "DISCORD_MCP_GUILD": "${user_config.guild}",
+        "DISCORD_MCP_READ_ONLY": "${user_config.read_only}",
+        "DISCORD_MCP_ALLOWED_SERVERS": "${user_config.allowed_servers}",
+        "DISCORD_MCP_TELEMETRY": "${user_config.usage_stats}",
+        "DISCORD_MCP_DATA_DIR": "${HOME}${/}.orygn${/}discord-mcp",
+        "DISCORD_MCP_PACKAGING": "mcpb"
       }
     }
   },
+  "tools_generated": true,
   "user_config": {
     "discord_token": {
       "type": "string",
       "title": "Discord bot token",
-      "description": "Needed for anything real. From the Discord Developer Portal: your application, Bot page, Reset Token. Turn on all three Privileged Gateway Intents while you are there. The server starts without it and its setup check explains what to fix.",
+      "description": "From the Discord Developer Portal: your application, Bot page, Reset Token. Turn on all three Privileged Gateway Intents while you are there.",
       "sensitive": true,
-      "required": false
+      "required": true
     },
     "guild": {
       "type": "string",
       "title": "Default server id",
       "description": "Optional. With it set, tools can omit the server parameter.",
-      "required": false
+      "required": false,
+      "default": ""
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Load only the tools that look things up. Nothing can be sent, changed, or deleted, and scheduled messages wait.",
+      "required": false,
+      "default": false
+    },
+    "allowed_servers": {
+      "type": "string",
+      "title": "Allowed servers",
+      "description": "Optional. Server ids separated by commas. When set, the tools act only in these servers.",
+      "required": false,
+      "default": ""
+    },
+    "usage_stats": {
+      "type": "boolean",
+      "title": "Usage stats",
+      "description": "Send a small, anonymous usage report so we can see which features people use and what to improve. Nothing in it identifies you or your servers.",
+      "required": false,
+      "default": true
     }
   },
   "compatibility": {

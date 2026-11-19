@@ -85,9 +85,8 @@ export function registerReactionTools(
       );
 
       // Every emoji is worked out before the first reaction goes on, from one
-      // read of the server's emoji. A name that matches nothing used to fail
-      // the call after the reactions before it were already added, with no
-      // word that they had been.
+      // read of the server's emoji, so a name that matches nothing fails the
+      // call before any reaction is added.
       const guildEmojis = (await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[];
       const wanted: Array<{ api: string; display: string }> = [];
       for (const input of emojis) wanted.push(await resolveEmoji(rest, guildId, input, guildEmojis));

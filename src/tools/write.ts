@@ -79,7 +79,7 @@ import { filesParam, prepareFiles, unreferencedFiles, type PreparedFiles } from 
 import { channelSettingsBody, channelSettingsContext, channelSettingsFields, hasChannelSettings } from "./channelSettings.js";
 import { roleAppearanceBody, roleAppearanceFields } from "./roleAppearance.js";
 
-// Write tools: the Phase 2 core. Everything here changes state on Discord,
+// Write tools. Everything here changes state on Discord,
 // so every tool preflights the bot's actual permissions and explains what
 // is missing instead of letting Discord answer with a bare 403. The one
 // destructive tool here, delete_message, runs through the confirmation
@@ -579,7 +579,7 @@ export function registerWriteTools(
           // Start from the category's overwrites, the way Discord does for a
           // channel created without any, and change only what was asked.
           // Sending a fresh set replaces the category's, so a read-only
-          // channel in a private category used to come out visible to
+          // channel in a private category would come out visible to
           // everyone.
           const change: SugarChange = {};
           if ((private_to?.length ?? 0) > 0) {

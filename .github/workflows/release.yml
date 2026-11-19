@@ -1,15 +1,13 @@
 # Publishes a tagged release to npm through GitHub's OIDC trusted publisher,
-# then to the official MCP registry the same way, so no token exists
-# anywhere: not in repository secrets, not on a laptop. npm exchanges the job's identity token for a short-lived publish
+# then to the official MCP registry the same way, so no long-lived publish
+# token exists. npm exchanges the job's identity token for a short-lived publish
 # credential and attaches a provenance attestation. The package's settings
 # on npmjs.com name this repository, this workflow file, and the `npm`
 # environment as the only identity allowed to do that, and all three must
 # match or the registry answers with an auth failure rather than a config
 # error.
 #
-# Runs on a v* tag push. It can also be dispatched by hand with a tag name,
-# which exists for one reason: a tag pushed before this workflow existed
-# cannot trigger it.
+# Runs on a v* tag push. It can also be dispatched with an existing tag name.
 #
 # Two steps below look redundant and are not. npm is moved to 11.x because
 # the token exchange needs 11.5.1 or newer; an older npm silently falls back
@@ -140,6 +138,47 @@ jobs:
       # attached provenance.
       - name: Publish
         run: npm publish --access public --ignore-scripts --loglevel verbose
+
+  # The Claude Desktop bundle, attached to the GitHub release under a fixed
+  # name so the README's button (releases/latest/download/discord-mcp.mcpb)
+  # always gets the newest. If the release already exists the bundle is
+  # added to it; otherwise the release is created from this version's
+  # changelog section.
+  bundle:
+    name: Attach the Claude Desktop bundle
+    runs-on: ubuntu-latest
+    needs: publish-npm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+          node scripts/build-mcpb.mjs discord-mcp.mcpb
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" discord-mcp.mcpb --clobber
+          else
+            VERSION="${TAG#v}"
+            awk -v v="$VERSION" 'index($0, "## " v " ") == 1 { on = 1; next } on && /^## / { exit } on { print }' CHANGELOG.md > notes.md
+            gh release create "$TAG" discord-mcp.mcpb --title "$TAG" --notes-file notes.md --verify-tag
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'
 
   # The official MCP registry, authenticated the same tokenless way: the
   # registry accepts this repository's GitHub identity for the

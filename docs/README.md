@@ -5,18 +5,22 @@ covers installation and first use, start to finish.
 
 - [Getting started](getting-started.md): from nothing to a working setup,
   with the wizard or by hand.
+- [Recipes](recipes.md): prompts that work, for the jobs people use it for
+  most.
 - [Multiple bots](multi-bot.md): running several bots, one per server, from
   a single install.
 - [Toolsets](toolsets.md): loading only the tool groups a session needs,
   instead of all 164.
 - [Connecting AI clients](clients.md): exact configuration for Claude
-  Desktop, Claude Code, Cursor, Windsurf, ChatGPT, and any other MCP
-  client.
+  Desktop (bundle or config file), Claude Code, VS Code, Cursor, Windsurf,
+  Codex CLI, Cline, ChatGPT, and any other MCP client.
 - [Self-hosting](self-hosting.md): the HTTP transport, Docker, and the
   security model for networked deployments.
 - [Troubleshooting](troubleshooting.md): common problems and their fixes.
 - [Security whitepaper](security-whitepaper.md): plain-language trust
   overview for the person deciding whether to connect discord-mcp.
+- [Privacy](privacy.md): what leaves your machine, and how to turn each part
+  off.
 - [Tool catalog](tool-catalog.md): the full contract of every tool, with
   tiers, permissions, and conventions.
 

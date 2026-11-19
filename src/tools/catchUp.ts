@@ -66,8 +66,8 @@ export function activeSince(
 // the Message Content intent, text, embeds, attachments, and components
 // all arrive empty. Join notices, boosts, pins, stickers, forwards, and
 // polls are empty in their own way with the intent on, so they do not
-// count; counting them told people their intent was off because a few
-// members had joined.
+// count; counting them would tell people their intent was off because a
+// few members had joined.
 export function looksStripped(m: APIMessage, botId: string): boolean {
   if (m.author.id === botId) return false;
   const type = (m.type as number | undefined) ?? 0;

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { PermissionFlagsBits } from "discord-api-types/v10";
 import { PERMISSION_PRESETS } from "./discord/preflight.js";
+import { withoutBom } from "./textFiles.js";
 
 // The pure half of the setup wizard. Everything here is a function of its
 // inputs so the logic that touches user config files is unit tested
@@ -23,7 +24,7 @@ export function isOurEntry(entry: unknown): boolean {
 
 function parseConfigObject(existingText: string | undefined): Record<string, unknown> {
   if (!existingText || existingText.trim().length === 0) return {};
-  const parsed = JSON.parse(existingText) as unknown;
+  const parsed = JSON.parse(withoutBom(existingText)) as unknown;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("Config file is not a JSON object.");
   }
@@ -77,9 +78,8 @@ export function mergeClientConfig(
 // What the user added to this server's entry by hand and a rewrite must
 // not lose: an env block (a toolset selection, a token, a custom home) and
 // the app's own flags on the entry (disabled, autoApprove, and the like).
-// Only command and args are the wizard's to write. Before, re-registering
-// or upgrading from Omnicord wrote a bare entry, and a server set up
-// through env came back with no token or with every tool loaded.
+// Only command and args are the wizard's to write. A bare entry would leave
+// a server set up through env with no token, or with every tool loaded.
 //
 // Taken from the discord-mcp entry when it is this server's, otherwise
 // from the pre-2.0 entry. Someone else's server under the discord-mcp key
@@ -416,7 +416,7 @@ export function parseBotsFile(content: string | undefined): WizardBot[] {
   if (!content || !content.trim()) return [];
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(withoutBom(content));
   } catch {
     return [];
   }
@@ -475,7 +475,7 @@ function ensureOneDefault(bots: WizardBot[]): WizardBot[] {
 export function botsFileServers(content: string | undefined): Record<string, unknown> | undefined {
   if (!content || !content.trim()) return undefined;
   try {
-    const servers = (JSON.parse(content) as { servers?: unknown } | null)?.servers;
+    const servers = (JSON.parse(withoutBom(content)) as { servers?: unknown } | null)?.servers;
     return servers && typeof servers === "object" && !Array.isArray(servers)
       ? (servers as Record<string, unknown>)
       : undefined;

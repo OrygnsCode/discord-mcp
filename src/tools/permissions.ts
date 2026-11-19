@@ -268,7 +268,7 @@ async function overwriteGrants(
 }
 
 // The confirmation for an overwrite change that hands out power or access;
-// null when the change hands out neither and goes ahead as before.
+// null when the change hands out neither and goes ahead at once.
 async function gateOverwrite(
   rest: REST,
   guildId: string,
@@ -778,8 +778,8 @@ export function registerPermissionTools(
       }
 
       // The owner has every permission whatever their roles say. The
-      // calculation from roles does not know that: as the fallback it
-      // answered no for an owner, and as the explanation it credited a role.
+      // calculation from roles does not know that: as the fallback it would
+      // answer no for an owner, and as the explanation it would credit a role.
       const isOwner =
         ((await rest.get(Routes.guild(guildId))) as { owner_id?: string }).owner_id === actorId;
       if (isOwner) local = ALL_PERMISSIONS;

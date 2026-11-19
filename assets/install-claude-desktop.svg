@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="205" height="32" viewBox="0 0 205 32" role="img" aria-label="Install in Claude Desktop">
+  <title>Install in Claude Desktop</title>
+  <rect x="0.5" y="0.5" width="204" height="31" rx="7" fill="#10161F" stroke="#2EE6D9" stroke-opacity="0.55"/>
+  <g fill="none" stroke="#2EE6D9" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 9v10"/>
+    <path d="M12.5 15l4.5 4.5 4.5-4.5"/>
+    <path d="M11.5 23h11"/>
+  </g>
+  <text x="34" y="20.5" font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="13" fill="#A3ADBA" textLength="52" lengthAdjust="spacingAndGlyphs">Install in</text>
+  <text x="91" y="20.5" font-family="Segoe UI, -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#FFFFFF" textLength="102" lengthAdjust="spacingAndGlyphs">Claude Desktop</text>
+</svg>

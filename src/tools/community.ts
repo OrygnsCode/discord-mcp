@@ -80,7 +80,7 @@ async function inviteTargets(rest: REST, code: string): Promise<string[] | undef
 }
 
 // A lifetime in the largest unit that reads cleanly. Rounding to hours
-// said "0 hour(s)" for a five-minute invite.
+// would say "0 hour(s)" for a five-minute invite.
 export function describeDuration(seconds: number): string {
   const unit = (n: number, name: string) => `${n} ${name}${n === 1 ? "" : "s"}`;
   if (seconds < 60) return unit(seconds, "second");
@@ -274,8 +274,8 @@ export function registerCommunityTools(
       // handed over. The list travels in a field Discord could stop
       // honouring, and an invite created without it is open to anyone with
       // the link, roles included, while this tool would report it as
-      // limited. Discord applies the list at once (checked live with a
-      // thousand people), so anything but the same list back means the
+      // limited. Discord applies the list at once (checked live with a list
+      // of a thousand), so anything but the same list back means the
       // invite is not what was asked for, and it is revoked.
       if (targets) {
         const limitedTo = await inviteTargets(rest, invite.code);
@@ -427,7 +427,7 @@ export function registerCommunityTools(
 
       // The invite must be this server's. Discord revokes any invite the
       // bot has rights over, whichever server it belongs to, so without
-      // this a code from another server the bot is in was revoked there
+      // this a code from another server the bot is in would be revoked there
       // while the confirmation named this one.
       let invite: APIInvite;
       try {

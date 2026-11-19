@@ -8,8 +8,8 @@ import { fetchPublicUrl } from "./fetchUrl.js";
 // address an embed points at, so a link in a message cannot make this
 // server fetch from wherever it likes. The proxy also resizes: asking for a
 // width and height (both are needed; one alone returns the original) and
-// format=webp turned a 3000x1500 PNG of 1.2 MB into a 1568x784 webp of
-// about 95 KB when probed live. Models see little more than about 1.15
+// format=webp turns a 3000x1500 PNG of 1.2 MB into a 1568x784 webp of
+// about 95 KB. Models see little more than about 1.15
 // megapixels, so nothing larger is fetched.
 
 export const MAX_EDGE = 1568;

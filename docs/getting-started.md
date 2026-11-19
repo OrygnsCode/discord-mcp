@@ -39,6 +39,10 @@ node dist/index.js init
 
 Either `init` command starts the setup wizard.
 
+Already have a bot token, and use VS Code, Cursor, or Claude Desktop? The
+[one-click installs](../README.md#one-click-installs) add discord-mcp to the
+app without the wizard. The Claude Desktop bundle needs no Node of your own.
+
 ## The wizard (recommended)
 
 The wizard first asks how many bots you want to set up. Answer 1 for the
@@ -128,7 +132,10 @@ If you would rather not use the wizard:
 | `DISCORD_MCP_GUILD` | Optional default server id so tools can omit the server. |
 | `DISCORD_MCP_SAFE_MODE` | Default on. Destructive tools preview and require a confirm token first. Set to `false` only for trusted automation. |
 | `DISCORD_MCP_CONFIRM` | `auto` (default) confirms destructive actions in a dialog when the app can show one, by the preview token otherwise. `token` always uses the token, for setups with nobody to answer a dialog. `dialog` refuses destructive actions in apps that cannot show one. |
-| `DISCORD_MCP_UPDATE_CHECK` | Default on for an installed copy: once a day it asks the npm registry for the latest version number, and a newer one is mentioned once per session and in `run_setup_check`. Set `false` to never ask. |
+| `DISCORD_MCP_READ_ONLY` | Off by default. `true` loads only the 60 tools that change nothing, and scheduled messages wait for an install that may send them. |
+| `DISCORD_MCP_ALLOWED_SERVERS` | Optional. Server ids, separated by commas, that the tools may act in; every other server is refused. A default server, if set, must be one of them. |
+| `DISCORD_MCP_TELEMETRY` | Default on for an installed copy: the anonymous daily usage report described in [privacy.md](privacy.md). `off` turns it off, and so does `DO_NOT_TRACK=1`. |
+| `DISCORD_MCP_UPDATE_CHECK` | Default on for an installed copy and the Claude Desktop bundle: once a day it asks the npm registry for the latest version number, and a newer one is mentioned once per session and in `run_setup_check`. Set `false` to never ask. |
 | `DISCORD_MCP_STRICT_PARAMS` | Default on: a tool that changes something refuses a parameter it does not have, or a key inside one, and a read-only tool says which it ignored. Set `false` only for a host that adds keys of its own to every call and is refused for it. |
 | `DISCORD_MCP_ALLOW_PRIVATE_URLS` | Off by default: files, emoji, stickers, sounds, and avatars are fetched only from public addresses. Set `true` only if you serve your own files from a private address. |
 | `DISCORD_MCP_GATEWAY` | Default on with a token: the bot shows online and live events work. `off` for REST only. |

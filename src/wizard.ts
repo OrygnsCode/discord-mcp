@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { VERSION } from "./config.js";
+import { sendSetupEvent, type SetupEvent } from "./usageReport.js";
+import { usageSwitch } from "./usageStats.js";
 import {
   envFilePath,
   botsFilePath,
@@ -51,6 +53,8 @@ import {
 // wizardLib.ts; this file is the conversation.
 
 const PORTAL = "https://discord.com/developers/applications";
+// The setup walkthrough, at the point where it creates the bot in the portal.
+const WALKTHROUGH_PORTAL_STEPS = "https://youtu.be/vYAdzxzLKWY?t=32";
 
 const packageRoot = dirname(
   createRequire(import.meta.url).resolve("../package.json")
@@ -209,6 +213,9 @@ async function fetchAppInfo(token: string): Promise<AppInfo | undefined> {
   };
 }
 
+// What the setup event reports when the wizard ends (see usageReport.ts).
+const setup: SetupEvent = { flow: "fresh", outcome: "unfinished", apps: [] };
+
 export async function runWizard(): Promise<void> {
   console.log("");
   console.log(`  ${bold(cyan("Discord MCP"))} ${dim("by Orygn")}`);
@@ -217,7 +224,10 @@ export async function runWizard(): Promise<void> {
   console.log(`  ${dim("changed until it says so.")}\n`);
 
   try {
-    if (await offerUpgrade()) return;
+    if (await offerUpgrade()) {
+      setup.flow = "upgrade";
+      return;
+    }
     const cfg = readExistingConfig();
     const hasExisting = cfg.envToken !== undefined || cfg.bots.length > 0;
 
@@ -237,9 +247,10 @@ export async function runWizard(): Promise<void> {
       console.log(`    ${bold("4")}. Quit`);
       const choice = await ask(`  Choose 1-4 ${dim("[1]")}: `);
       if (choice === "4") throw new Cancelled();
+      setup.flow = choice === "2" ? "reregister" : choice === "3" ? "fresh" : "add_bot";
       // Re-registering keeps the bots and only rewrites the client entry,
       // which is the whole repair for a client pointing at a copy that no
-      // longer exists. Without it, that repair meant redoing the setup.
+      // longer exists, without redoing the setup.
       if (choice === "2") {
         if (await registerClient()) printRestartSteps();
         return;
@@ -254,14 +265,17 @@ export async function runWizard(): Promise<void> {
     await runFreshSetup(cfg);
   } catch (err) {
     if (err instanceof Cancelled) {
+      setup.outcome = "cancelled";
       console.log(
         yellow("\nSetup cancelled. Nothing was changed beyond any step already confirmed.")
       );
       return;
     }
+    setup.outcome = "failed";
     throw err;
   } finally {
     process.stdin.pause();
+    await sendSetupEvent(setup).catch(() => false);
   }
 }
 
@@ -421,7 +435,8 @@ async function setupBot(opts: {
   console.log(`  If you do not have this bot yet: open ${underline(PORTAL)}`);
   console.log("  New Application, name it, open the Bot page, Reset Token, copy it.");
   console.log("  Turn on all three Privileged Gateway Intents, and under Installation");
-  console.log("  choose Guild Install only (uncheck User Install).\n");
+  console.log("  choose Guild Install only (uncheck User Install).");
+  console.log(`  These steps on video: ${underline(WALKTHROUGH_PORTAL_STEPS)}\n`);
 
   let token = "";
   let app: AppInfo | undefined;
@@ -554,6 +569,7 @@ async function writeClientEntry(
   target: ConfigCandidate,
   entry: { command: string; args: string[] }
 ): Promise<boolean> {
+  if (!setup.apps.includes(target.client)) setup.apps.push(target.client);
   const before = existsSync(target.path) ? readFileSync(target.path, "utf8") : undefined;
   let state: ReturnType<typeof clientConfigState>;
   try {
@@ -639,6 +655,7 @@ async function registerClient(): Promise<boolean> {
     // screen, which still finishes the setup.
     await writeClientEntry(present[whereIndex - 1], entry);
   } else {
+    setup.apps.push("snippet");
     console.log("\n  Add this to your client's MCP config:\n");
     printSnippet(entry);
   }
@@ -646,10 +663,14 @@ async function registerClient(): Promise<boolean> {
 }
 
 function printRestartSteps(): void {
+  setup.outcome = "completed";
   console.log(`\n${bold("Two steps left:")}`);
   console.log(`  1. ${bold("Fully restart your AI client")}: quit it from the system tray,`);
   console.log("     not just the window. New tools only load on a full restart.");
   console.log(`  2. In a fresh chat, ask: ${cyan('"run a setup check on my Discord bot"')}`);
+  if (usageSwitch().on) {
+    console.log(dim("\n  Anonymous usage stats are on; DISCORD_MCP_TELEMETRY=off turns them off."));
+  }
   console.log("");
 }
 

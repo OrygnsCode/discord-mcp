@@ -34,7 +34,7 @@ import {
   imagesHint,
 } from "./common.js";
 
-// Read-only tools: the Phase 1 core. Everything in this file can be called
+// Read-only tools. Everything in this file can be called
 // freely; nothing here changes any state on Discord.
 
 // Roles whose permission digests are worth surfacing. The full bitfield is
@@ -510,8 +510,6 @@ export function registerReadTools(
       const warnings: string[] = [];
 
       // The role is worked out first, because it narrows a name search too.
-      // Given both, only the name used to be searched, and the result still
-      // said the members found held the role.
       let wantedRole: { id: string; name: string } | undefined;
       if (role) {
         const roles = await getRoles(rest, guildId);

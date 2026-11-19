@@ -5,6 +5,40 @@ The format follows Keep a Changelog, and the project follows semantic
 versioning. Version 1.0.0 marked the public launch; releases since follow
 semver.
 
+## 2.1.0 (2026-11-19)
+
+### Added
+
+- Read-only mode: `DISCORD_MCP_READ_ONLY=true` loads only the tools that look
+  things up.
+- Allowed servers: `DISCORD_MCP_ALLOWED_SERVERS` keeps the tools to the
+  servers you list.
+- One-click installs for VS Code, VS Code Insiders, Cursor, and Claude
+  Desktop. The Claude Desktop bundle is attached to every release and tells
+  you when a newer one is out.
+- Usage stats: a small, anonymous daily report so we can see which features
+  people use. [What's in it](https://github.com/OrygnsCode/discord-mcp/blob/main/docs/privacy.md). `DISCORD_MCP_TELEMETRY=off`
+  turns it off.
+- Docs: recipes, a privacy page, and setup for VS Code, Codex CLI, and Cline.
+
+### Changed
+
+- A bulk delete confirmed in a busy channel now deletes exactly what its
+  preview showed. Before, new messages arriving in between made the token
+  stop matching, and it was refused.
+- The setup wizard links the walkthrough video at the step that creates the
+  bot.
+
+### Fixed
+
+- A `bots.json` or an AI app's config saved with a byte order mark (PowerShell
+  5 and Notepad can do this) was read as invalid JSON.
+- The Docker image's data folder was not writable, so without a bind mount
+  anything that saves to it failed with a permission error: build plans,
+  change records for undo, saved blueprints, and scheduled messages. The
+  folder is now part of the image, owned by the server's user, and
+  `compose.yaml` keeps it in a named volume.
+
 ## 2.0.0 (2026-11-12)
 
 Omnicord is now discord-mcp. Same project, new name: the package, the
@@ -164,8 +198,7 @@ If you run an earlier version, these are the ones to know about.
 - `ban_member` bans people who already left, `create_thread` works in
   announcement channels, and `timeout_member` refuses an administrator up
   front instead of failing with a bare 403.
-- The tool catalog described several things no tool did. Every row was
-  checked against the code.
+- The tool catalog was checked row by row against the code and corrected.
 
 ## 1.4.1 (2026-10-17)
 
@@ -233,8 +266,8 @@ and update, and refreshes dependencies. No new tools.
 ## 1.4.0 (2026-09-07)
 
 Rich message layouts, private channels in one call, and a fix to how
-blueprints carry the role hierarchy, found by rebuilding a server onto a
-second one and watching the roles come out upside down.
+blueprints carry the role hierarchy, which a rebuild onto another server
+could reverse.
 
 ### Added
 
@@ -296,16 +329,14 @@ second one and watching the roles come out upside down.
   role granted access to a private channel. Duplicates now get a numeric
   suffix, and an overwrite for a managed role is reported instead of emitted
   as a reference to a role the blueprint never defines. Both warn.
-- The tool catalog is corrected throughout. 46 rows named parameters that do
-  not exist, several sections described pagination, envelope fields, and
-  blueprint contents that do not match the code, and two capability claims
-  are now true. A smoke assertion holds the catalog and `docs/toolsets.md` to
+- The tool catalog is corrected throughout: parameter names, pagination,
+  envelope fields, and blueprint contents now match the code. A smoke assertion holds the catalog and `docs/toolsets.md` to
   the code's `core` set so they cannot drift again.
 
 ## 1.3.0 (2026-08-11)
 
 Adds toolsets, so a session can load only the tools it needs, and ships the
-four application command tools the catalog has specified since it was written.
+four application command tools.
 Existing setups are unaffected: with no new configuration the tool surface is
 byte for byte what it was.
 
@@ -343,9 +374,8 @@ byte for byte what it was.
   timeout, now use a multi-value literal and emit a plain enum again. The
   blueprint tools inline their channel definition instead of pointing at it
   with a `$ref`, which helps clients that do not resolve references.
-- The tool catalog no longer claims that 15 tools are always loaded and 136
-  load on demand. That was never true; every tool was registered on every
-  start. It now describes what actually happens.
+- The tool catalog now describes how tools load: every tool is registered
+  at start.
 
 ### Security
 
@@ -446,7 +476,7 @@ A dependency release. No tool changes and no behavior changes.
 
 ## 1.1.1 (2026-07-07)
 
-A live agent-style test of the 1.1.0 tools turned up one defect.
+One fix to the 1.1.0 tools.
 
 ### Fixed
 
@@ -499,8 +529,7 @@ expressions.
 
 ## 1.0.3 (2026-06-25)
 
-Setup wizard improvements and a moderation message fix, both found
-through a full live stress test of the tool surface.
+Setup wizard improvements and a moderation message fix.
 
 ### Added
 
@@ -553,8 +582,7 @@ and the repository is public under the Elastic License 2.0.
 
 ## 0.8.4 (2026-06-11)
 
-Wizard polish and a stable data home for installed copies, both driven
-by a full dress rehearsal of the npx install flow.
+Wizard polish and a stable data home for installed copies.
 
 ### Added
 
@@ -583,9 +611,8 @@ by a full dress rehearsal of the npx install flow.
 
 ## 0.8.3 (2026-06-11)
 
-AutoMod keyword presets, found through live rehearsal: models asked to
-build a slur filter had to write the word list themselves because the
-tool only offered custom keywords.
+AutoMod keyword presets, so a model asked to build a slur filter no longer
+has to write the word list itself.
 
 ### Added
 
@@ -653,9 +680,7 @@ vulnerabilities.
 
 ## 0.8.0 (2026-06-11)
 
-Parity completion: 33 new tools (148 total) closing every remaining gap
-against the catalog, which was built as the competitor superset. Only the
-four application-command tools stay deferred.
+33 new tools (148 total).
 
 ### Added
 
@@ -708,7 +733,7 @@ completing the builder's config-as-code story.
 
 ## 0.6.1 (2026-06-11)
 
-Fixes from the second third-party client test, run over a flaky network.
+Fixes for flaky networks and a few error messages.
 
 ### Fixed
 
@@ -818,7 +843,7 @@ The gateway: the bot is online, and it can watch the server in real time.
 
 ## 0.2.0 (2026-06-10)
 
-Engagement and community parity: 26 new tools, bringing the total to 66.
+Engagement and community: 26 new tools, bringing the total to 66.
 
 ### Added
 

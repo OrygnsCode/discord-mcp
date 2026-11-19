@@ -245,8 +245,7 @@ export function normalizeDispatch(t: string, d: unknown): Draft | null {
 }
 
 // Ring-buffered subscriptions. Buffer delivery works in every MCP client:
-// subscribe, act, then poll get_recent_events. Push notification delivery
-// can layer on later without changing this contract.
+// subscribe, act, then poll get_recent_events.
 const BUFFER_CAP = 500;
 
 export interface Subscription {
@@ -254,7 +253,7 @@ export interface Subscription {
   types: Set<string>;
   // The server whose events are recorded. The gateway bot hears every
   // server it is in, so without this a subscription made while looking at
-  // one server filled with another server's messages too. Null only for
+  // one server would fill with another server's messages too. Null only for
   // subscriptions made by code that wants everything.
   guildId: string | null;
   channelId: string | null;

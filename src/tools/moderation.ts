@@ -371,9 +371,9 @@ export function registerModerationTools(
         member = undefined;
       }
 
-      // Permission and protection checks run on every path. The earlier
-      // version skipped both for hackbans, which also let a protected
-      // member's raw ID slip past the owner and hierarchy rules.
+      // Permission and protection checks run on every path, hackbans
+      // included, so a protected member's raw ID cannot get past the owner
+      // and hierarchy rules.
       const [roles, botUser, guildData] = await Promise.all([
         getRoles(rest, guildId),
         getBotUser(rest),
@@ -685,7 +685,7 @@ export function registerModerationTools(
       if (user) {
         // An id needs no lookup, and must not get one: someone who has left
         // or was banned still has entries, and looking them up as a member
-        // failed before the log was ever asked.
+        // would fail before the log was ever asked.
         const id = user.trim().match(/^(?:<@!?)?(\d{17,20})>?$/)?.[1];
         if (id) {
           query.set("user_id", id);

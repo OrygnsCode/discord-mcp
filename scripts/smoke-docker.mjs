@@ -56,6 +56,7 @@ await cleanup();
 const refusal = await docker(
   "run", "--rm", "--name", `${NAME}-refusal`,
   "-e", "DISCORD_TOKEN=",
+  "-e", "DISCORD_MCP_TELEMETRY=off",
   IMAGE
 ).then(
   () => ({ code: 0, stderr: "" }),
@@ -72,6 +73,7 @@ await docker(
   "run", "-d", "--name", NAME,
   "-p", `${PORT}:3414`,
   "-e", "DISCORD_TOKEN=",
+  "-e", "DISCORD_MCP_TELEMETRY=off",
   "-e", `DISCORD_MCP_HTTP_TOKEN=${TOKEN}`,
   IMAGE
 );
@@ -139,6 +141,27 @@ check(
 
 const whoami = await docker("exec", NAME, "whoami");
 check(whoami.stdout.trim() === "discord-mcp", "container runs as a non-root user");
+
+// That user can write the data folder with no volume mounted: plans, change
+// records, blueprints, and schedules all live there.
+const saveBody = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 2,
+  method: "tools/call",
+  params: { name: "save_blueprint", arguments: { name: "smoke", blueprint: { roles: [{ name: "Member", preset: "member" }] } } },
+});
+const saveText = await (
+  await fetch(`${BASE}/mcp`, { method: "POST", headers: { ...headers, Authorization: `Bearer ${TOKEN}` }, body: saveBody })
+).text().catch(() => "");
+const saveFrames = saveText.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
+let saveSummary = "";
+try {
+  const reply = JSON.parse(saveFrames.length > 0 ? saveFrames[saveFrames.length - 1] : saveText);
+  saveSummary = JSON.parse(reply.result?.content?.[0]?.text ?? "{}").summary ?? "";
+} catch {
+  saveSummary = saveText.slice(0, 200);
+}
+check(saveSummary.startsWith("Saved the blueprint"), `the container can save to its data folder without a volume (${saveSummary})`);
 
 await cleanup();
 

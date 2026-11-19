@@ -221,8 +221,8 @@ export function registerSettingsTools(
           }
           // Discord requires these three of a Community server, so enabling
           // it sets them. A different value passed in the same call cannot
-          // hold: it used to be overridden while the result reported it as
-          // set. And a setting changed only because Community needs it is
+          // hold, so it is refused rather than overridden. And a setting
+          // changed only because Community needs it is
           // named, since the caller did not ask for it.
           if (explicit_media_filter !== undefined && explicit_media_filter !== "all_members") {
             return fail(

@@ -114,8 +114,8 @@ export async function fetchImageAsDataUri(
 
 // Server and role images, as Discord's CDN serves them. Discord keeps only
 // a hash, accepts a new image only as data, and stops serving a hash the
-// moment it is replaced (probed live: both earlier server icons answered
-// 404 right after the change). So whatever may need putting back is
+// moment it is replaced (the old address answers 404 right away). So
+// whatever may need putting back is
 // downloaded while it is still the current image.
 const SERVER_IMAGE_PATHS: Record<string, string> = {
   icon: "icons",

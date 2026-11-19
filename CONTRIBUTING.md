@@ -86,7 +86,7 @@ src/
     intents.ts        # Privileged intent negotiation
   builder/
     planner.ts        # Blueprint to ordered build plan
-    executor.ts       # Plan to live server (additive only)
+    executor.ts       # Plan to live server
     diff.ts           # Blueprint drift detection
     overwrites.ts     # private_to / read_only compiled to permission overwrites
   tools/
@@ -97,6 +97,7 @@ scripts/
   unit.mjs            # Pure logic. No network, no token.
   smoke.mjs           # Stdio session on the 2025 protocol, plus the wizard. No token.
   smoke-modern.mjs    # Stdio session on the 2026-07-28 protocol. No token.
+  smoke-dialog.mjs    # The confirmation dialog end to end. No token.
   smoke-http.mjs      # HTTP transport on both protocols, auth, security gates.
   acceptance.mjs      # Live end-to-end against a real Discord server.
   smoke-docker.mjs    # Builds and verifies the container image.
@@ -108,7 +109,7 @@ docs/                 # Getting started, clients, self-hosting, security, tools
 The same checks CI runs:
 
 ```bash
-npm test        # build + unit + smoke + smoke-modern + smoke-http
+npm test        # build + unit + smoke + smoke-modern + smoke-dialog + smoke-http
 ```
 
 Individually:
@@ -136,9 +137,14 @@ node scripts/acceptance.mjs
 things.** It cleans up after itself, but it must only ever be pointed at a
 **disposable test server you own**. Never run it against a live community.
 
-It reads `DISCORD_TOKEN` and `DISCORD_MCP_GUILD` from `.env`. Create a throwaway
+It reads `DISCORD_TOKEN` and `DISCORD_MCP_GUILD` from the `.env` in the folder
+`DISCORD_MCP_HOME` points at. Create a throwaway
 Discord application and an empty server for it, and double check
-`get_bot_info` reports the bot and guild you expect before you run it.
+`get_bot_info` reports the bot and guild you expect before you run it. The
+suite refuses to start unless that server's id is listed in
+`DISCORD_MCP_ACCEPTANCE_GUILDS` (comma-separated). To also test lifting a ban,
+set `DISCORD_MCP_ACCEPTANCE_BAN_USER` to the id of an account that is not in
+the server; without it that check is skipped.
 
 The suite ends with a multi-bot section that checks routing against live
 Discord: that every server is labelled with the bot that reaches it, that

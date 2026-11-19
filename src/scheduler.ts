@@ -13,15 +13,15 @@ import { Routes } from "discord-api-types/v10";
 import type { ServerConfig } from "./config.js";
 import { getRest, getRestForToken } from "./discord/client.js";
 import { dataDir } from "./home.js";
-import { setting } from "./settings.js";
+import { setting, settingSource } from "./settings.js";
 
 // The message scheduler. Schedules persist as JSON files so they survive a
 // restart, and the engine fires them with a periodic tick while the
 // process is alive. A message that came due while the server was off is sent
 // on the next start (catch-up), then either removed or advanced to its
-// next repeat. This is honest about its one limit: nothing fires while the
-// process is down, so always-on delivery wants the hosted or container
-// deployment, not a laptop that sleeps.
+// next repeat. Its one limit: nothing fires while the process is down, so
+// always-on delivery needs a machine or container that stays up, not a
+// laptop that sleeps.
 
 // Default tick is half a minute, fine for human-scheduled messages.
 // Overridable so tests can run the loop fast.
@@ -142,8 +142,7 @@ function cancelMark(id: string): string {
 
 // Cancels a schedule. One that is being sent at this moment cannot be
 // stopped, but a mark is left so a repeat does not come back afterwards
-// (completeClaim checks it); before, cancelling then answered "no such
-// message" and the repeat carried on.
+// (completeClaim checks it).
 export function cancelSchedule(id: string): boolean {
   if (!ID_PATTERN.test(id)) return false;
   const file = fileFor(id);
@@ -280,9 +279,8 @@ let running = false;
 // bot is gone is logged once, not every tick.
 const complained = new Set<string>();
 
-// The client that sends a schedule: the bot that scheduled it. A message
-// scheduled by a bot other than the default used to go out through the
-// default bot, which may not be in that server at all.
+// The client that sends a schedule: the bot that scheduled it, since the
+// default bot may not be in that server at all.
 function restFor(config: ServerConfig, schedule: ScheduledMessage): ReturnType<typeof getRest> | undefined {
   if (!schedule.bot) return config.token ? getRest(config) : undefined;
   const bot = config.bots.find((b) => b.name === schedule.bot);
@@ -297,6 +295,18 @@ async function tick(config: ServerConfig): Promise<void> {
     for (const listed of listSchedules()) {
       if (new Date(listed.send_at).getTime() > Date.now()) continue;
       if (listed.failed && listed.repeat === "none") continue;
+      // Queued before the allowed servers were set, for a server outside
+      // them: not sent, and kept, so lifting the restriction sends it.
+      if (config.allowedServers && !config.allowedServers.has(listed.guild_id)) {
+        if (!complained.has(listed.id)) {
+          complained.add(listed.id);
+          console.error(
+            `discord-mcp scheduler: ${listed.id} is for a server outside ${settingSource("ALLOWED_SERVERS")}, ` +
+              "so it is not sent. It stays queued; cancel it, or allow that server."
+          );
+        }
+        continue;
+      }
       const rest = restFor(config, listed);
       if (!rest) {
         if (!complained.has(listed.id)) {

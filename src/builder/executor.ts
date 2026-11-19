@@ -403,7 +403,7 @@ export async function executePlan(
 
         // Start from the category's overwrites, which is what Discord does
         // itself for a channel created without any, and change only what
-        // the blueprint sets. Sending a fresh set instead once dropped the
+        // the blueprint sets. Sending a fresh set instead would drop the
         // category's privacy whenever the channel set something of its own.
         const change: SugarChange = {};
         if (details.private_to !== "inherit") {

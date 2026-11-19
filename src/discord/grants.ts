@@ -267,8 +267,8 @@ export function unionGrants(list: Grants[]): Grants {
 // for @everyone, no roles at all), and held next to each other role in turn.
 // Alone is not enough. In a server where being able to see channels comes
 // from a "Member" role, someone holding only the changed role sees nothing
-// before or after, so lifting @everyone's deny on a private channel looked
-// like it opened it to no one, while every member could walk in. Roles that
+// before or after, so lifting @everyone's deny on a private channel would
+// look like it opened it to no one, while every member could walk in. Roles that
 // behave the same (the same permissions and the same overwrites everywhere)
 // are judged once, which keeps a server with hundreds of color roles cheap.
 // A combination of three or more roles that only together gain something is

@@ -74,14 +74,21 @@ docker compose up -d
 Saved blueprints and scheduled messages are stored as JSON files under the
 data directory, which can be moved with `DISCORD_MCP_DATA_DIR`. The default
 is a `.discord-mcp` folder next to the package for a source checkout, or
-`.orygn/discord-mcp` in the user folder for an installed copy. To keep the data
-across container restarts, mount that directory as a volume.
+`.orygn/discord-mcp` in the user folder for an installed copy. In the image it
+is `/app/.discord-mcp`, which also holds build plans and the change records
+undo works from. It survives a container restart but not a new container from
+an updated image, so mount a volume there to keep it; `compose.yaml` does.
 
 To keep all config and data in one place, set `DISCORD_MCP_HOME` to a directory
 and mount it as a volume: `.env`, `bots.json`, and saved data all live there.
 This is also how to run several bots in a container, since there is no
 multi-token environment variable: put a `bots.json` in the mounted
 `DISCORD_MCP_HOME`. See [Multiple bots](multi-bot.md).
+
+The image sends the anonymous daily usage report described in
+[privacy.md](privacy.md), marked as coming from a container. Set
+`DISCORD_MCP_TELEMETRY=off` to turn it off. The image never runs the update
+check: its version is the image you deployed.
 
 ## Connecting a remote client
 
@@ -90,5 +97,4 @@ Point your client's remote MCP configuration at
 clients on the current protocol (2026-07-28) send their protocol version
 with every request, and clients on the 2025 revisions are answered without
 a session id, so no client is tied to one server process. Everything else
-works exactly as it does locally. For a hosted, zero-setup version of this
-without running anything yourself, see the project roadmap.
+works exactly as it does locally.

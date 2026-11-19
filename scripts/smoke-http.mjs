@@ -40,7 +40,7 @@ function check(condition, label) {
 }
 
 function startServer(extraEnv = {}) {
-  const env = { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", ...extraEnv };
+  const env = { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", DISCORD_MCP_TELEMETRY: "off", ...extraEnv };
   return spawn(process.execPath, [entry, "--http", "--port", String(PORT)], {
     cwd: root,
     env,
@@ -310,7 +310,7 @@ async function post(body, headers = {}) {
   const child = spawn(
     process.execPath,
     [entry, "--http", "--port", String(PORT), "--host", "0.0.0.0"],
-    { cwd: root, env: { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_HTTP_TOKEN: "" }, stdio: ["ignore", "ignore", "pipe"] }
+    { cwd: root, env: { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_HTTP_TOKEN: "", DISCORD_MCP_TELEMETRY: "off" }, stdio: ["ignore", "ignore", "pipe"] }
   );
   let stderr = "";
   child.stderr.on("data", (d) => (stderr += d.toString()));

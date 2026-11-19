@@ -23,9 +23,11 @@ import { rateLimitStats } from "../discord/rateLimit.js";
 import { growthChecks } from "../discord/thresholds.js";
 import { SERVER_INFO } from "../identity.js";
 import { LEGACY_PREFIX, PREFIX, legacySettingsInUse, settingSource } from "../settings.js";
-import { RELEASES_URL, UPDATE_COMMAND, availableUpdate } from "../updateCheck.js";
+import { RELEASES_URL, availableUpdate, updateSteps } from "../updateCheck.js";
 import { confirmMode, safeModeEnabled, unknownConfirmMode } from "../safety.js";
 import { appCanShowDialog } from "../requestContext.js";
+import { usageLine } from "../usageStats.js";
+import { BUNDLE_SETTINGS, packagedAs } from "../packaging.js";
 
 // The gateway state reported for a bot other than the default one.
 const NO_CONNECTION = { status: "off", reason: "only the default bot holds the live connection" } as const;
@@ -104,9 +106,8 @@ export function registerDiagnostics(
         ]);
 
         const intents = readIntents(app.flags ?? 0);
-        // The guild list endpoint returns at most 200 entries per page.
-        // Pagination is not worth wiring up until a bot of ours can
-        // realistically exceed that.
+        // The guild list endpoint returns at most 200 entries per page, so
+        // a full page is reported as "200 or more".
         const guildCount = guilds.length;
         const guildCountDisplay =
           guildCount >= 200 ? "200 or more" : String(guildCount);
@@ -117,10 +118,16 @@ export function registerDiagnostics(
           intents.presence ? "presence on" : "presence off",
         ].join(", ");
 
+        // The id list is there to pick a server by, so it leaves out the
+        // ones this install may not act in. The count stays the bot's own.
+        const allowed = config.allowedServers;
+        const pickable = allowed ? guilds.filter((g) => allowed.has(g.id)) : guilds;
+        const settings = restrictionLines(config);
         return ok(
           `Logged in as ${user.username} (app: ${app.name}). ` +
             `In ${guildCountDisplay} server${guildCount === 1 ? "" : "s"}. Intents: ${intentSummary}. ` +
-            `discord-mcp v${VERSION}.`,
+            `discord-mcp v${VERSION}.` +
+            (settings.length > 0 ? ` ${settings.join(" ")}` : ""),
           {
             bot: {
               id: user.id,
@@ -135,13 +142,13 @@ export function registerDiagnostics(
               // First few guilds by id and name. Enough for a human or a
               // model to grab the right id for DISCORD_MCP_GUILD without a
               // separate lookup.
-              list: guilds
+              list: pickable
                 .slice(0, 10)
                 .map((g) => ({ id: g.id, name: g.name })),
             },
-            // Only the default bot holds the live connection. Its state
-            // was reported for every bot, so a second bot read as online
-            // and watchable when it is neither.
+            ...(settings.length > 0 ? { settings } : {}),
+            // Only the default bot holds the live connection, so any other
+            // bot is reported as having none.
             gateway: selectedBot.isDefault ? getGatewayState() : NO_CONNECTION,
             intents,
             server: { name: SERVER_INFO.name, version: VERSION },
@@ -197,9 +204,7 @@ export function registerDiagnostics(
           check: "version",
           status: "warn",
           detail: `discord-mcp ${newer} is available; this is ${VERSION}.`,
-          fix:
-            `Run \`${UPDATE_COMMAND}\`, choose "Re-register with your AI client", then fully restart the client. ` +
-            `What changed: ${RELEASES_URL}`,
+          fix: `The person who set this up ${updateSteps()}. What changed: ${RELEASES_URL}`,
         });
       }
 
@@ -244,13 +249,15 @@ export function registerDiagnostics(
           status: "fail",
           detail: "No DISCORD_TOKEN is set.",
           fix:
-            "Run `npx @orygn/discord-mcp init`, or set DISCORD_TOKEN in the MCP " +
-            `server config (env section) or in ${configFolders().map((f) => join(f, ".env")).join(" or ")}. ` +
+            (packagedAs() === "mcpb"
+              ? `In Claude, open ${BUNDLE_SETTINGS}, fill in "Discord bot token" and save. `
+              : "Run `npx @orygn/discord-mcp init`, or set DISCORD_TOKEN in the MCP " +
+                `server config (env section) or in ${configFolders().map((f) => join(f, ".env")).join(" or ")}. `) +
             "Get the token from " +
             PORTAL_BOT_PAGE +
             ", Reset Token.",
         });
-        return finishChecks(checks);
+        return finishChecks(checks, config);
       }
       let entered: { rest: REST; bot: BotConfig };
       try {
@@ -313,11 +320,11 @@ export function registerDiagnostics(
               PORTAL_BOT_PAGE +
               ", Reset Token, and update DISCORD_TOKEN.",
           });
-          return finishChecks(checks);
+          return finishChecks(checks, config);
         }
         // Anything else is an answer too: this is the tool people run when
-        // something is wrong, and a dropped connection used to come back as
-        // a bare error with every finding so far thrown away.
+        // something is wrong, so a dropped connection is reported as a
+        // finding and the findings before it are kept.
         checks.push({
           check: "discord_reachable",
           status: "fail",
@@ -326,7 +333,7 @@ export function registerDiagnostics(
             "Check this machine's network connection and https://discordstatus.com, " +
             "then run the check again.",
         });
-        return finishChecks(checks);
+        return finishChecks(checks, config);
       }
 
       // Check 3: privileged intents. Members and Message Content gate core
@@ -433,7 +440,7 @@ export function registerDiagnostics(
         });
       }
 
-      return finishChecks(checks);
+      return finishChecks(checks, config);
     }
   );
 }
@@ -486,7 +493,24 @@ function confirmationCheck(): SetupCheck {
   };
 }
 
-function finishChecks(checks: SetupCheck[]) {
+// Settings that limit what this install does, one plain line each. They are
+// choices, not problems, so they sit beside the checks and are not counted.
+export function restrictionLines(config: Pick<ServerConfig, "readOnly" | "allowedServers">): string[] {
+  const lines: string[] = [];
+  if (config.readOnly) {
+    lines.push(`Read-only (${settingSource("READ_ONLY")}): only tools that change nothing are loaded, and queued messages are not sent.`);
+  }
+  if (config.allowedServers) {
+    const n = config.allowedServers.size;
+    lines.push(`Acts only in ${n} server${n === 1 ? "" : "s"} (${settingSource("ALLOWED_SERVERS")}).`);
+  }
+  return lines;
+}
+
+function finishChecks(checks: SetupCheck[], config: ServerConfig) {
+  // The usage stats line is here and not in get_bot_info: this is where
+  // someone, or their AI, looks to see what the install does.
+  const settings = [...restrictionLines(config), usageLine()];
   const fails = checks.filter((c) => c.status === "fail");
   const warns = checks.filter((c) => c.status === "warn");
   const passes = checks.length - fails.length - warns.length;
@@ -500,9 +524,10 @@ function finishChecks(checks: SetupCheck[]) {
   }
 
   const warnings = warns.map((w) => w.detail);
+  const data = { checks, settings };
   return fails.length > 0
-    ? fail(summary, { checks })
-    : ok(summary, { checks }, warnings);
+    ? fail(summary, data)
+    : ok(summary, data, warnings);
 }
 
 // Translates Discord REST errors into something actionable instead of a

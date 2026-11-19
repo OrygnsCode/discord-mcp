@@ -21,8 +21,8 @@ import { PermissionFlagsBits } from "discord-api-types/v10";
 //   how members get in at all.
 // - Read-only: @everyone is denied the whole send family, the posting roles
 //   get it back, and no other role overwrite grants it. Giving posting roles
-//   back only sending once left thread creation denied to every role, so in
-//   a read-only channel nobody but an admin could start a thread.
+//   back only sending would leave thread creation denied to every role, so
+//   in a read-only channel nobody but an admin could start a thread.
 // - Open: @everyone's deny on the send family is lifted; role allows stay.
 // - The bot itself always gets an allow overwrite when a restriction is
 //   applied, so a build can never lock the bot out of what it just made.

@@ -159,9 +159,9 @@ export function startHttpServer(
 
   // Every request is handled inside one catch. This listener is async, and
   // anything thrown from it would be an unhandled rejection, which ends the
-  // process: before this, a single request with a malformed Host header,
-  // sent by anyone who could reach the port and before any token check,
-  // stopped the server.
+  // process: a single request with a malformed Host header, sent by anyone
+  // who could reach the port and before any token check, would stop the
+  // server.
   const httpServer = createServer((req, res) => {
     handle(req, res).catch((err) => {
       console.error(`discord-mcp http: ${err instanceof Error ? err.message : String(err)}`);

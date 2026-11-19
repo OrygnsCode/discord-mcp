@@ -56,7 +56,7 @@ async function resolveForum(
 // The forum with its tags as they are right now. Adding, changing, or
 // removing a tag sends the whole tag list back, and the channel list it
 // would otherwise come from can be half a minute old: a tag someone added
-// in that time was dropped by the next edit here.
+// in that time would be dropped by the next edit here.
 async function withCurrentTags(rest: REST, forum: ForumChannel): Promise<ForumChannel> {
   const now = (await rest.get(Routes.channel(forum.id))) as ForumChannel;
   return { ...forum, available_tags: now.available_tags ?? [] };
@@ -537,9 +537,9 @@ export function registerForumTools(
     guildId: string,
     query: string
   ): Promise<APIThreadChannel> {
-    // Forum and media channels: only threads under one of these are posts.
-    // Every active thread in the server used to count, so a post tool given
-    // a name could land on an ordinary thread in a text channel.
+    // Forum and media channels: only threads under one of these are posts,
+    // so a post tool given a name cannot land on an ordinary thread in a
+    // text channel.
     const forums = new Set(
       (await getChannels(rest, guildId)).filter((c) => c.type === 15 || c.type === 16).map((c) => c.id)
     );

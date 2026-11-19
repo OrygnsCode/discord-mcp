@@ -7,12 +7,12 @@
     "url": "https://github.com/OrygnsCode/discord-mcp",
     "source": "github"
   },
-  "version": "2.0.0",
+  "version": "2.1.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@orygn/discord-mcp",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "transport": {
         "type": "stdio"
       },
@@ -27,6 +27,24 @@
         {
           "name": "DISCORD_MCP_GUILD",
           "description": "Optional default server id so tools can omit the guild parameter.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DISCORD_MCP_READ_ONLY",
+          "description": "Optional. true loads only the tools that change nothing.",
+          "isRequired": false,
+          "format": "boolean"
+        },
+        {
+          "name": "DISCORD_MCP_ALLOWED_SERVERS",
+          "description": "Optional. Server ids, separated by commas, that the tools may act in.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DISCORD_MCP_TELEMETRY",
+          "description": "Anonymous daily usage stats, on by default. off turns them off.",
           "isRequired": false,
           "format": "string"
         }

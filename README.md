@@ -27,8 +27,9 @@ other MCP client) is the brain. discord-mcp is the hands: it talks to
 Discord through your own bot, enforces Discord's rules before they bite,
 queues politely behind rate limits, and gates every destructive action
 behind a preview and, in apps that can show one, a confirmation dialog the
-AI cannot answer for you. There is no LLM inside it and no cloud
-service behind it. Your bot token stays in a file on your machine.
+AI cannot answer for you. There is no LLM inside it, and nothing sits
+between you and Discord. Your bot token stays in a file on your machine,
+and your servers, members and messages only ever go to Discord itself.
 
 ## Quick start
 
@@ -72,10 +73,29 @@ Plain English results, and the exact fix for anything that is wrong.
 
 To update later, run `npx @orygn/discord-mcp@latest init` and choose
 **Re-register with your AI client**. Your bots and settings carry over.
-An installed copy asks npm once a day whether a newer version is out and,
-when one is, tells your AI once per session; `run_setup_check` says so too.
-The request carries the package name and nothing about your servers.
-`DISCORD_MCP_UPDATE_CHECK=false` turns it off.
+
+### One-click installs
+
+Already have a bot token? These add discord-mcp to your app directly:
+
+[![Install in VS Code](https://raw.githubusercontent.com/OrygnsCode/discord-mcp/main/assets/install-vscode.svg)](https://vscode.dev/redirect/mcp/install?name=discord-mcp&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22discord_token%22%2C%22description%22%3A%22Discord%20bot%20token%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40orygn%2Fdiscord-mcp%22%5D%2C%22env%22%3A%7B%22DISCORD_TOKEN%22%3A%22%24%7Binput%3Adiscord_token%7D%22%7D%7D)
+[![Install in VS Code Insiders](https://raw.githubusercontent.com/OrygnsCode/discord-mcp/main/assets/install-vscode-insiders.svg)](https://insiders.vscode.dev/redirect/mcp/install?name=discord-mcp&inputs=%5B%7B%22type%22%3A%22promptString%22%2C%22id%22%3A%22discord_token%22%2C%22description%22%3A%22Discord%20bot%20token%22%2C%22password%22%3Atrue%7D%5D&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40orygn%2Fdiscord-mcp%22%5D%2C%22env%22%3A%7B%22DISCORD_TOKEN%22%3A%22%24%7Binput%3Adiscord_token%7D%22%7D%7D&quality=insiders)
+[![Install in Cursor](https://raw.githubusercontent.com/OrygnsCode/discord-mcp/main/assets/install-cursor.svg)](https://cursor.com/en/install-mcp?name=discord-mcp&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBvcnlnbi9kaXNjb3JkLW1jcCJdLCJlbnYiOnsiRElTQ09SRF9UT0tFTiI6IiJ9fQ%3D%3D)
+[![Install in Claude Desktop](https://raw.githubusercontent.com/OrygnsCode/discord-mcp/main/assets/install-claude-desktop.svg)](https://github.com/OrygnsCode/discord-mcp/releases/latest/download/discord-mcp.mcpb)
+
+- **VS Code** asks for the token the first time the server starts and
+  keeps it as a secret.
+- **Cursor** has a field for the token in its install box.
+- **Claude Desktop** downloads the bundle, which runs on Claude's own Node.
+  Open it with Claude Desktop, or drag it onto Settings > Desktop app >
+  Extensions (on Windows, double-clicking may not open Claude). Fill in the
+  token in the form that opens, save, and switch the extension on. The
+  bundle does not update itself: to update, open the newest one the same way.
+  Claude offers Update and keeps your token and settings.
+
+No bot yet? The wizard walks you through making one, or follow
+[Manual setup](docs/getting-started.md#manual-setup). More detail per app in
+[Connecting AI clients](docs/clients.md).
 
 ### Coming from Omnicord
 
@@ -89,10 +109,10 @@ keep working through all of 2.x.
 
 | Area | Examples |
 |---|---|
-| Server building | Plan and execute a full server build from a brief: roles, categories, channels, permissions. Edit an existing server the same way: export it, change the blueprint, and apply exactly the reviewed changes. Undo any structural change from its record. Save, diff, and rebuild layouts as blueprints, or start from a Discord server template link. |
+| Server building | Plan and execute a full server build from a brief: roles, categories, channels, permissions. Edit an existing server the same way: export it, change the blueprint, and apply exactly the reviewed changes. Undo recorded structural changes. Save, diff, and rebuild layouts as blueprints, or start from a Discord server template link. |
 | Messaging | Send, edit, pin, forward, react, polls, scheduled messages, DMs, webhooks, embeds with fields and pictures, files from links, and rich Components V2 layouts for rules and welcome panels. |
 | Reading | Catch up on everything since you were last here in one call, channel history, full-text message search, the images in a message for the AI to look at, members, roles, permissions, audit log. |
-| Moderation | Timeouts, kicks, bans, bulk actions, and prune, all preview first, plus raid lockdown to pause invites and DMs. |
+| Moderation | Timeouts, kicks, bans, bulk actions, and prune, all preview first, plus raid lockdown to pause invites and DMs. A bulk delete removes exactly the messages its preview showed, even while a raid keeps posting. |
 | AutoMod | Discord's server side filters: keyword rules, Discord maintained preset lists (slurs, profanity), member profile checks, spam and mention flood limits. |
 | Real time | Subscribe to live server events and ask "what did I miss?" |
 | Structure | Channels, categories, permission overwrites, reordering, cloning, voice channel status. |
@@ -174,6 +194,13 @@ on its tool permission settings, Desktop can also ask you before it runs a
 tool. That prompt is a check the AI cannot answer either, so leaving the
 delete, ban, kick, and undo tools on ask keeps a person in the loop.
 
+Two settings limit what an install can do. `DISCORD_MCP_READ_ONLY=true`
+loads only the 60 tools that change nothing, for an assistant that just
+reads and reports. `DISCORD_MCP_ALLOWED_SERVERS` lists the servers it may
+act in, and refuses every other one, whether a call names it by name, ID or
+message link. If either value can't be read, the server won't start, so a
+typo never leaves it unrestricted.
+
 ## Multiple bots
 
 discord-mcp can drive several bots from one install, one per server. Point
@@ -242,9 +269,12 @@ are configured in a `bots.json` in the same directory; see
 | `DISCORD_TOKEN` | The bot token. Required for anything real; the server boots without it and the diagnostics explain what to fix. |
 | `DISCORD_MCP_GUILD` | Optional default server ID so tools can omit the guild parameter. |
 | `DISCORD_MCP_TOOLS` | Which tool groups to load. Unset loads all 164. See [Toolsets](docs/toolsets.md). |
+| `DISCORD_MCP_READ_ONLY` | Off by default. `true` loads only the 60 tools that change nothing, and scheduled messages wait for an install that may send them. |
+| `DISCORD_MCP_ALLOWED_SERVERS` | Optional. Server IDs, separated by commas, that the tools may act in; every other server is refused. A default server, if set, must be one of them. |
+| `DISCORD_MCP_TELEMETRY` | Default on for an installed copy: the anonymous daily usage report described in [Privacy](docs/privacy.md). `off` turns it off, and so does `DO_NOT_TRACK=1`. |
 | `DISCORD_MCP_SAFE_MODE` | Default on. Destructive tools preview first and require a confirm token; set to `false` only for trusted automation. |
 | `DISCORD_MCP_CONFIRM` | How destructive actions are confirmed. `auto` (default): in a dialog when the app can show one, by the preview token otherwise. `token`: always by the token, for setups with nobody to answer a dialog (Claude Code run with `-p` closes every dialog unanswered). `dialog`: only in a dialog; apps that cannot show one are refused. |
-| `DISCORD_MCP_UPDATE_CHECK` | Default on for an installed copy: once a day it asks the npm registry for the latest version number, and a newer one is mentioned once per session and in `run_setup_check`. Set `false` to never ask. A source checkout and the Docker image never ask. |
+| `DISCORD_MCP_UPDATE_CHECK` | Default on for an installed copy and the Claude Desktop bundle: once a day it asks the npm registry for the latest version number, and a newer one is mentioned once per session and in `run_setup_check`. Set `false` to never ask. A source checkout and the Docker image never ask. |
 | `DISCORD_MCP_STRICT_PARAMS` | Default on: a tool that changes something refuses a parameter it does not have, or a key inside one, and a read-only tool says which it ignored. Set `false` only for a host that adds keys of its own to every call and is refused for it. |
 | `DISCORD_MCP_ALLOW_PRIVATE_URLS` | Off by default: files, emoji, stickers, sounds, and avatars are fetched only from public addresses, never from this machine or its private network. Set `true` only if you serve your own files from a private address. |
 | `DISCORD_MCP_GATEWAY` | Default on when a token is set: the bot shows as online and real time event subscriptions work. Set to `off` for REST only operation. |
@@ -279,13 +309,27 @@ package root for a source checkout, or `.orygn/discord-mcp` in your user
 folder for an installed copy. The folder the client starts it from is not
 read. A real environment variable overrides the files.
 
+## Privacy
+
+**Usage stats.** discord-mcp sends a small, anonymous usage report so we can
+see which features people use and what to improve. Nothing in it identifies
+you or your servers. To turn it off, set `DISCORD_MCP_TELEMETRY=off`.
+[What's included](docs/privacy.md)
+
+**Update check.** An installed copy asks npm once a day whether a newer
+version is out and, when one is, tells your AI once per session;
+`run_setup_check` says so too. The request carries the package name and
+nothing about your servers. `DISCORD_MCP_UPDATE_CHECK=false` turns it off.
+
 ## Documentation
 
 | Doc | What is in it |
 |---|---|
 | [Getting started](docs/getting-started.md) | Setup in a few minutes, wizard or by hand. |
 | [Multiple bots](docs/multi-bot.md) | Running several bots, one per server, from one install. |
-| [Connecting AI clients](docs/clients.md) | Exact config for Claude Desktop, Claude Code, Cursor, Windsurf, ChatGPT, and anything else. |
+| [Recipes](docs/recipes.md) | Prompts that work, for the jobs people use it for most. |
+| [Connecting AI clients](docs/clients.md) | Exact config for Claude Desktop (bundle or config file), Claude Code, VS Code, Cursor, Windsurf, Codex CLI, Cline, ChatGPT, and anything else. |
+| [Privacy](docs/privacy.md) | What leaves your machine, and how to turn each part off. |
 | [Self-hosting](docs/self-hosting.md) | HTTP transport, Docker, and the security model for networked deployments. |
 | [Troubleshooting](docs/troubleshooting.md) | Common problems and their fixes. |
 | [Security whitepaper](docs/security-whitepaper.md) | Plain language: what discord-mcp can and cannot touch, for whoever decides whether to install it. |
@@ -296,8 +340,7 @@ The docs are written to be read by AI assistants too: paste a page at
 your AI and have it walk you through.
 
 discord-mcp is also listed on the
-[official MCP registry](https://registry.modelcontextprotocol.io),
-[Smithery](https://smithery.ai/servers/orygn/omnicord), and
+[official MCP registry](https://registry.modelcontextprotocol.io) and
 [Docker Hub](https://hub.docker.com/r/orygn/discord-mcp).
 
 ## Tests
@@ -306,14 +349,16 @@ discord-mcp is also listed on the
 node scripts/unit.mjs          # pure logic: resolver, permissions, planner, gate
 node scripts/smoke.mjs         # stdio session on the 2025 protocol, plus the wizard; no token needed
 node scripts/smoke-modern.mjs  # stdio session on the 2026-07-28 protocol; no token needed
+node scripts/smoke-dialog.mjs  # the confirmation dialog end to end; no token needed
 node scripts/smoke-http.mjs    # HTTP transport on both protocols, auth, security gates
 node scripts/acceptance.mjs    # live end-to-end against a disposable test server
+cd telemetry && npm test       # the usage stats receiver, on a local copy of its runtime
 ```
 
 The acceptance suite needs `DISCORD_MCP_HOME` pointing at a folder whose
 `.env` holds a test bot's `DISCORD_TOKEN` and `DISCORD_MCP_GUILD`. It
-refuses to run against any server not listed as disposable, and cleans up
-after itself. `scripts/smoke-docker.mjs` builds and verifies the container
+refuses to run against any server not listed in
+`DISCORD_MCP_ACCEPTANCE_GUILDS`, and cleans up after itself. `scripts/smoke-docker.mjs` builds and verifies the container
 image and needs a running Docker daemon.
 
 The unit and smoke suites need no Discord token, so you can watch the

@@ -13,7 +13,7 @@ import { enter, guarded, guildParam, resolveChannel } from "./common.js";
 
 // Real-time event subscriptions over the gateway connection. Delivery is
 // buffered: subscribe, let things happen, then poll get_recent_events.
-// That works in every MCP client today; push delivery can layer on later.
+// That works in every MCP client.
 
 const TYPE_NAMES = Object.keys(SUBSCRIBABLE_TYPES);
 

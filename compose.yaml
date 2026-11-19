@@ -10,4 +10,11 @@ services:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       DISCORD_MCP_GUILD: ${DISCORD_MCP_GUILD:-}
       DISCORD_MCP_HTTP_TOKEN: ${DISCORD_MCP_HTTP_TOKEN}
+    # Build plans, change records (for undo), saved blueprints, and scheduled
+    # messages, kept when the container is replaced by a newer image.
+    volumes:
+      - discord-mcp-data:/app/.discord-mcp
     restart: unless-stopped
+
+volumes:
+  discord-mcp-data:

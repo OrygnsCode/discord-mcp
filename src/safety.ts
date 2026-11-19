@@ -10,6 +10,7 @@ import { getActingBot, getTargetServer, getTargetServerId } from "./discord/acti
 import { appCanShowDialog, currentRequest } from "./requestContext.js";
 import { quoted, visibleOnly } from "./discord/names.js";
 import { setting, settingSource } from "./settings.js";
+import { noteGate } from "./usageStats.js";
 
 // The confirmation gate for destructive operations, per tool-catalog 1.4.
 //
@@ -46,6 +47,9 @@ interface PendingConfirmation {
   tool: string;
   argsHash: string;
   expiresAt: number;
+  // What the preview showed, when the tool asked for it to be kept (see
+  // GateInput.keep). Handed back when the action goes ahead.
+  kept?: unknown;
 }
 
 interface PendingDialog extends PendingConfirmation {
@@ -93,7 +97,7 @@ export function confirmInstruction(next: string, dialog = confirmsInDialog()): s
     );
   }
   // The last sentence closes the way a planted message gets through: a
-  // user who trusts it says "do what it says", and the model counted that
+  // user who trusts it says "do what it says", and a model would count that
   // as the user asking for the change itself.
   return (
     `Show the user this preview and get their answer before ${next}. Skip ` +
@@ -161,30 +165,62 @@ export interface GateInput {
   // How long the token lives. Two minutes unless the action re-checks
   // everything when it runs and the preview takes a while to read.
   ttlMs?: number;
+  // Kept with the token this call issues, and handed back by gateKeeping
+  // when the action goes ahead. For an action whose targets move on their
+  // own, such as the newest messages in a busy channel: the token is bound
+  // to the request, and this holds exactly what the preview showed, so the
+  // action is done to that and never to something that arrived since.
+  keep?: unknown;
 }
 
 type GateResult = CallToolResult | InputRequiredResult | null;
+
+// The gate's answer, plus what the preview kept when the action goes ahead.
+export interface GateOutcome {
+  answer: GateResult;
+  kept?: unknown;
+}
+
+// What a confirm_token's preview kept, while the token is still good for
+// this exact request, so a tool can describe the action it confirms (in the
+// dialog, say) before the gate decides. A token from another request gives
+// nothing, and the gate then refuses it. Deciding is still the gate's: this
+// changes nothing.
+export function keptFor(token: string | undefined, tool: string, args: Record<string, unknown>): unknown {
+  if (!token) return undefined;
+  const entry = pending.get(token);
+  if (!entry || entry.tool !== tool || entry.expiresAt <= Date.now()) return undefined;
+  if (entry.argsHash !== hashAction(tool, args, getActingBot()?.bot, getTargetServerId())) return undefined;
+  return entry.kept;
+}
 
 // Returns null when the caller may proceed with the real operation, or a
 // finished result (preview, token, dialog request, or rejection) to return
 // as is.
 export function gateDestructive(input: GateInput): GateResult {
+  return gateKeeping(input).answer;
+}
+
+// gateDestructive, for a tool that passes keep: when the action may go
+// ahead, kept is what that token's preview kept.
+export function gateKeeping(input: GateInput): GateOutcome {
   const now = Date.now();
   sweepExpired(now);
   const acting = getActingBot();
   const argsHash = hashAction(input.tool, input.args, acting?.bot, getTargetServerId());
   const safe = safeModeEnabled();
 
-  // dry_run always wins. Passed together with a token, the call used to go
-  // ahead for real, which is the opposite of what a dry run is asked for.
-  // The token is neither checked nor spent, so the same call without
-  // dry_run still goes ahead.
+  // dry_run always wins, even passed together with a token. The token is
+  // neither checked nor spent, so the same call without dry_run still goes
+  // ahead.
   if (input.dryRun && input.confirmToken) {
-    return ok(
-      `Dry run: nothing was changed, because dry_run was passed along with the confirm_token. ${input.previewSummary} ` +
-        "To go ahead, call again with the confirm_token and without dry_run.",
-      { executed: false, preview: input.previewDetails ?? null }
-    );
+    return {
+      answer: ok(
+        `Dry run: nothing was changed, because dry_run was passed along with the confirm_token. ${input.previewSummary} ` +
+          "To go ahead, call again with the confirm_token and without dry_run.",
+        { executed: false, preview: input.previewDetails ?? null }
+      ),
+    };
   }
 
   // The app is calling back with the user's answer to a dialog this gate
@@ -198,47 +234,56 @@ export function gateDestructive(input: GateInput): GateResult {
   const refuse = safe && !dialog && confirmMode() === "dialog";
 
   if (input.dialogOnly) {
-    if (dialog) return askInDialog(input, argsHash);
-    if (refuse) return refuseWithoutDialog(input);
-    return null;
+    if (dialog) return { answer: askInDialog(input, argsHash) };
+    if (refuse) return { answer: refuseWithoutDialog(input) };
+    return { answer: null };
   }
 
   if (input.confirmToken) {
     const entry = pending.get(input.confirmToken);
     if (!entry) {
-      return fail(
-        "That confirm_token is unknown or was already used. Call the tool " +
-          "again without a token to get a fresh preview."
-      );
+      return {
+        answer: fail(
+          "That confirm_token is unknown or was already used. Call the tool " +
+            "again without a token to get a fresh preview."
+        ),
+      };
     }
     if (entry.expiresAt <= now) {
       pending.delete(input.confirmToken);
-      return fail(
-        "That confirm_token expired. Call the tool again without a token " +
-          "to get a fresh preview."
-      );
+      return {
+        answer: fail(
+          "That confirm_token expired. Call the tool again without a token " +
+            "to get a fresh preview."
+        ),
+      };
     }
     if (entry.tool !== input.tool || entry.argsHash !== argsHash) {
-      return fail(
-        "That confirm_token was issued for a different action. Tokens are " +
-          "bound to the exact operation they previewed."
-      );
+      return {
+        answer: fail(
+          "That confirm_token was issued for a different action. Tokens are " +
+            "bound to the exact operation they previewed."
+        ),
+      };
     }
-    if (dialog) return askInDialog(input, argsHash, input.confirmToken);
+    if (dialog) return { answer: askInDialog(input, argsHash, input.confirmToken, entry.kept) };
     pending.delete(input.confirmToken);
-    if (refuse) return refuseWithoutDialog(input);
-    return null;
+    if (refuse) return { answer: refuseWithoutDialog(input) };
+    noteGate("confirmed");
+    return { answer: null, kept: entry.kept };
   }
 
   if (input.dryRun || safe) {
-    if (refuse) return refuseWithoutDialog(input);
+    if (refuse) return { answer: refuseWithoutDialog(input) };
     const token = randomBytes(16).toString("hex");
     const ttl = input.ttlMs ?? TOKEN_TTL_MS;
     pending.set(token, {
       tool: input.tool,
       argsHash,
       expiresAt: now + ttl,
+      ...(input.keep !== undefined ? { kept: input.keep } : {}),
     });
+    noteGate("preview");
     const mode = input.dryRun ? "Dry run" : "Safe mode";
     // With more than one bot, name the acting bot and server up front so the
     // human confirming sees exactly which bot would act where. This is the
@@ -246,22 +291,24 @@ export function gateDestructive(input: GateInput): GateResult {
     const summary = acting
       ? `Acting as ${acting.bot} in ${quoted(acting.server)}. ${input.previewSummary}`
       : input.previewSummary;
-    return ok(
-      `${mode}: nothing was changed. ${summary} ` +
-        (input.note ? `${input.note} ` : "") +
-        confirmInstruction("calling again with the confirm_token", dialog),
-      {
-        executed: false,
-        preview: input.previewDetails ?? null,
-        ...(acting ? { acting } : {}),
-        confirm_token: token,
-        token_expires_in_seconds: ttl / 1000,
-        confirmed_by: dialog ? "dialog" : "token",
-      }
-    );
+    return {
+      answer: ok(
+        `${mode}: nothing was changed. ${summary} ` +
+          (input.note ? `${input.note} ` : "") +
+          confirmInstruction("calling again with the confirm_token", dialog),
+        {
+          executed: false,
+          preview: input.previewDetails ?? null,
+          ...(acting ? { acting } : {}),
+          confirm_token: token,
+          token_expires_in_seconds: ttl / 1000,
+          confirmed_by: dialog ? "dialog" : "token",
+        }
+      ),
+    };
   }
 
-  return null;
+  return { answer: null };
 }
 
 // The dialog's text, written from the resolved target, never from anything
@@ -282,13 +329,14 @@ function dialogMessage(input: GateInput): string {
   return visibleOnly([where, input.dialogSummary ?? input.previewSummary, ...shown].filter(Boolean).join("\n"));
 }
 
-function askInDialog(input: GateInput, argsHash: string, token?: string): InputRequiredResult {
+function askInDialog(input: GateInput, argsHash: string, token?: string, kept?: unknown): InputRequiredResult {
   const id = randomBytes(16).toString("hex");
   dialogs.set(id, {
     tool: input.tool,
     argsHash,
     expiresAt: Date.now() + DIALOG_TTL_MS,
     ...(token ? { token } : {}),
+    ...(kept !== undefined ? { kept } : {}),
   });
   return inputRequired({
     inputRequests: {
@@ -311,7 +359,17 @@ function askInDialog(input: GateInput, argsHash: string, token?: string): InputR
   });
 }
 
-function answerFromDialog(input: GateInput, argsHash: string, id: string): GateResult {
+function answerFromDialog(input: GateInput, argsHash: string, id: string): GateOutcome {
+  // Read before the answer is taken, which removes the dialog.
+  const kept = dialogs.get(id)?.kept;
+  const answer = dialogAnswer(input, argsHash, id);
+  const said = (answer as { content?: Array<{ text?: string }> } | null)?.content?.[0]?.text ?? "";
+  if (answer === null) noteGate("confirmed");
+  else if (/"confirmation": "(?:declined|not_ticked|cancelled)"/.test(said)) noteGate("declined");
+  return answer === null ? { answer, kept } : { answer };
+}
+
+function dialogAnswer(input: GateInput, argsHash: string, id: string): GateResult {
   const entry = dialogs.get(id);
   if (!entry || entry.expiresAt <= Date.now()) {
     dialogs.delete(id);

@@ -16,7 +16,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const entry = join(root, "dist", "index.js");
 const dataDir = join(tmpdir(), `discord-mcp-smoke-modern-${Date.now()}`);
-const env = { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", DISCORD_MCP_DATA_DIR: dataDir };
+const env = { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", DISCORD_MCP_DATA_DIR: dataDir, DISCORD_MCP_TELEMETRY: "off" };
 
 let failures = 0;
 function check(condition, label) {

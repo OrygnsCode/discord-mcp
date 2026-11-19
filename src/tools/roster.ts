@@ -12,6 +12,7 @@ import { chooseSharedBot } from "../discord/botRouting.js";
 import { quoted } from "../discord/names.js";
 import { resolveOne } from "../discord/resolve.js";
 import { ok, fail } from "../envelope.js";
+import { settingSource } from "../settings.js";
 import { enter, guarded, guildParam, memberDisplayName } from "./common.js";
 
 // Roster reads: the servers the bot is in, a paged member list, and the
@@ -62,8 +63,14 @@ export function registerRosterTools(
           }
         })
       );
+      // Servers outside DISCORD_MCP_ALLOWED_SERVERS are left out: the tools
+      // refuse them, so listing them would only invite calls that fail.
+      const allowed = config.allowedServers;
+      const outsideIds = new Set(
+        allowed ? perBot.flatMap(({ guilds }) => guilds.filter((g) => !allowed.has(g.id)).map((g) => g.id)) : []
+      );
       const servers = perBot.flatMap(({ bot, guilds }) =>
-        guilds.map((g) => ({
+        guilds.filter((g) => !outsideIds.has(g.id)).map((g) => ({
           id: g.id,
           name: g.name,
           members_approximate:
@@ -110,6 +117,12 @@ export function registerRosterTools(
             ? ` ${unreachable.length} unreachable (${unreachable.join(", ")}); check them with run_setup_check.`
             : "");
       }
+      if (outsideIds.size > 0) {
+        sharedNotes.push(
+          `${outsideIds.size} more server(s) your bots are in are not listed: ` +
+            `this install may act only in the servers in ${settingSource("ALLOWED_SERVERS")}.`
+        );
+      }
       return ok(summary, {
         bots: config.bots.map((b) => ({
           name: b.name,
@@ -119,6 +132,7 @@ export function registerRosterTools(
         })),
         servers: listed,
         ...(unreachable.length ? { unreachable } : {}),
+        ...(outsideIds.size ? { not_allowed_here: outsideIds.size } : {}),
       }, sharedNotes);
     })
   );
@@ -190,8 +204,7 @@ export function registerRosterTools(
       const everyone = roleId === guildId;
 
       // How many hold it, from Discord's own count. The number of holders
-      // found while looking for enough to list is not that: it stops early,
-      // and it used to be reported as the total.
+      // found while looking for enough to list is not that: it stops early.
       let total: number | undefined;
       if (!everyone) {
         try {

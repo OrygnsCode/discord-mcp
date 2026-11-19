@@ -183,6 +183,6 @@ tokens and should be treated like `.env`: it is gitignored by default.
 ## One bot stays simple
 
 If you only ever use one bot, you never see any of this. A single
-`DISCORD_TOKEN` is one default bot, previews and tokens are byte-for-byte what
-they were before, and there is no `bots.json` to think about. Multi-bot is
+`DISCORD_TOKEN` is one default bot, previews name no bot, and there is no
+`bots.json` to think about. Multi-bot is
 additive and stays out of the way until you opt in.

@@ -62,5 +62,29 @@ jobs:
       - name: Protocol smoke test (2026-07-28 clients)
         run: node scripts/smoke-modern.mjs
 
+      - name: Confirmation dialog smoke test
+        run: node scripts/smoke-dialog.mjs
+
       - name: HTTP transport smoke test
         run: node scripts/smoke-http.mjs
+
+      # Once, not per platform: the Claude Desktop bundle the release
+      # attaches, built and validated from this commit.
+      - name: Claude Desktop bundle builds
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: node scripts/build-mcpb.mjs "$RUNNER_TEMP/discord-mcp.mcpb"
+
+      # The usage stats receiver (telemetry/), on a local copy of Cloudflare's
+      # runtime and database, including a report from the client just built.
+      - name: Usage stats receiver tests
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        working-directory: telemetry
+        run: |
+          npm ci
+          npm test
+
+      # The container image: builds, refuses to start without an HTTP token,
+      # answers over MCP, and can write its data folder with no volume.
+      - name: Docker image smoke test
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: node scripts/smoke-docker.mjs

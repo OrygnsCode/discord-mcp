@@ -75,8 +75,8 @@ export class ToolProblem extends Error {
 
 // Network failures below the API layer (connection timeouts, resets, DNS
 // trouble) are transient and worth a retry; surfacing them as raw stack
-// noise leaves the model guessing. Observed live during a flaky-network
-// Desktop session as undici ConnectTimeoutErrors.
+// noise leaves the model guessing. They arrive as undici
+// ConnectTimeoutErrors, among others.
 function isNetworkError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const codes = [
@@ -98,9 +98,8 @@ function isNetworkError(err: unknown): boolean {
 }
 
 // The public archived threads of a channel, newest first. Discord hands
-// them out a page at a time and says whether more remain; the first page
-// used to be reported as all of them. Read up to a cap, with "more" saying
-// whether older ones were left out.
+// them out a page at a time and says whether more remain. Read up to a cap,
+// with "more" saying whether older ones were left out.
 export async function archivedThreads(
   rest: REST,
   channelId: string,
@@ -318,16 +317,21 @@ export async function enter(
     })
   );
 
+  // DISCORD_MCP_ALLOWED_SERVERS: a server outside the list does not exist as
+  // far as the tools are concerned, whether it is named, given by id, or
+  // reached through a message link.
+  const visible = allowedGuildsOnly(botGuilds, config.allowedServers);
+
   const defaultBot = config.bots.find((b) => b.isDefault)?.name;
   const prefer = { defaultBot, byServer: config.serverBots };
   let resolution = resolveBotGuild(
-    botGuilds,
+    visible,
     wanted,
     opts.shared === "ask" ? {} : opts.shared === "listening" ? { defaultBot } : prefer
   );
   const heard = opts.shared === "listening" && resolution.kind === "match" && resolution.botName === defaultBot;
   if (opts.shared === "listening" && resolution.kind === "ambiguous-bot") {
-    resolution = resolveBotGuild(botGuilds, wanted, prefer);
+    resolution = resolveBotGuild(visible, wanted, prefer);
   }
   switch (resolution.kind) {
     case "match": {
@@ -351,8 +355,7 @@ export async function enter(
         );
       }
       // Record the acting bot for the safety gate, but only when more than one
-      // bot is configured. With a single bot there is nothing to disambiguate,
-      // so single-bot previews and tokens stay exactly as before.
+      // bot is configured. With a single bot there is nothing to disambiguate.
       if (config.bots.length > 1) {
         setActingBot({ bot: bot.name, server: resolution.guildName });
       }
@@ -379,13 +382,25 @@ export async function enter(
           }
         )
       );
-    case "no-guild":
+    case "no-guild": {
+      // Said plainly when the server exists but is not allowed here, so
+      // nobody goes looking for a missing invite.
+      const outside = config.allowedServers ? resolveBotGuild(botGuilds, wanted, {}) : undefined;
+      if (outside && (outside.kind === "match" || outside.kind === "ambiguous-bot")) {
+        throw new ToolProblem(
+          fail(
+            `${quoted(outside.guildName)} is not one of the servers this install may act in ` +
+              `(${settingSource("ALLOWED_SERVERS")}). Nothing was done there.`
+          )
+        );
+      }
       throw new ToolProblem(
         fail(
           `No configured bot is in a server matching "${wanted}". ` +
             "Check the name, or invite one of your bots to that server first."
         )
       );
+    }
     case "ambiguous-guild":
       throw new ToolProblem(
         fail(
@@ -394,6 +409,16 @@ export async function enter(
         )
       );
   }
+}
+
+// Each bot's server list narrowed to the allowed servers, or as it is when
+// no list is set. Pure, for the unit suite.
+export function allowedGuildsOnly<G extends { id: string }>(
+  botGuilds: Array<{ name: string; guilds: G[] }>,
+  allowed: ReadonlySet<string> | undefined
+): Array<{ name: string; guilds: G[] }> {
+  if (!allowed) return botGuilds;
+  return botGuilds.map((b) => ({ ...b, guilds: b.guilds.filter((g) => allowed.has(g.id)) }));
 }
 
 // Select a bot for operations that are not tied to a server (bot identity,
@@ -558,8 +583,8 @@ export async function resolveMember(
 const MEMBER_SEARCH_LIMIT = 25;
 
 // A member as the resolver sees them: found by username, display name, or
-// server nickname alike. Before, only the username counted, so asking for
-// "Sam" picked samantha_k (username) over the member everyone sees as Sam.
+// server nickname alike, so asking for "Sam" finds the member everyone sees
+// as Sam, not samantha_k by username.
 export function memberResolvable(m: APIGuildMember): Resolvable {
   return {
     id: m.user?.id ?? "",
@@ -607,7 +632,7 @@ export function flaggedMedia(m: APIMessage): Array<{ kind: string; name: string;
 
 // Said wherever messages are listed: the digest names attachments only by
 // file name, and a model reading one has no way to know the picture can be
-// fetched for it (seen with a real model: it said it could not see one).
+// fetched for it.
 export function imagesHint(messages: APIMessage[]): string {
   const n = messages.filter((m) => collectImages(m).length > 0).length;
   if (n === 0) return "";
@@ -688,7 +713,7 @@ export function digestMessage(m: APIMessage) {
     ...(texts.length > 0 ? { embeds_text: texts } : {}),
     ...(forwarded ? { forwarded } : {}),
     // Only present when Discord's scanning flagged something, so ordinary
-    // messages read exactly as before.
+    // messages are unaffected.
     ...(flagged.length > 0 ? { flagged_media: flagged } : {}),
     reactions: (m.reactions ?? []).map((r) => ({
       emoji: r.emoji.name ?? r.emoji.id ?? "?",
@@ -823,10 +848,8 @@ export function parseHexColor(value: string): number {
 
 // Embed input, shared by every tool that posts or edits a message.
 //
-// The objects are strict: a key they do not know is refused. They used to
-// take a title, a body, a color, and a link and drop anything else without
-// a word, so a caller who passed fields got a card with none and no hint
-// why.
+// The objects are strict: a key they do not know is refused, so a caller
+// never gets a card missing what they passed with no hint why.
 const EMBED_PICTURE = /^(https?|attachment):\/\/\S+$/i;
 const pictureUrl = (name: string) =>
   z

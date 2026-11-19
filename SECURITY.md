@@ -66,6 +66,16 @@ Administrator bit; Administrator is offered only as an explicitly labeled
 opt-in, and the confirmation gate applies at every permission level.
 Permission presets for role creation never include Administrator.
 
+An operator can narrow an install below what the bot may do.
+`DISCORD_MCP_READ_ONLY=true` registers only the tools annotated read-only, so
+nothing that changes Discord is offered to the model at all, and the message
+scheduler does not run. `DISCORD_MCP_ALLOWED_SERVERS` limits every tool to the
+listed guild ids: other guilds are filtered out of server resolution, so a
+call naming one by name, id, or message link is refused, and global changes
+that would appear in every guild (global slash commands, the bot's own
+profile) are refused too. Both are parsed strictly at startup: a value that
+cannot be read stops the server instead of leaving it unrestricted.
+
 ### MCP03 Tool Poisoning
 
 Tool descriptions are static, shipped in the package, and contain no
@@ -79,11 +89,9 @@ no rug-pull surface.
 Dependencies are few and first-party where it matters: the official MCP
 SDK and the official discord.js REST and gateway libraries. `npm audit`
 against the production tree reports zero vulnerabilities, and that is
-held rather than assumed: `@discordjs/rest` depends on an exact `undici`
-6.24.1 that has since drawn four advisories, so an npm override carries
-`undici` forward to 6.27.0, which clears all four. The bumped HTTP client
-is verified against live Discord by the acceptance suite rather than
-taken on trust. Advisories that surface in transitive dependencies are
+held rather than assumed: an npm override keeps `undici`, the HTTP client
+under discord.js, on a patched release, and the bumped client is verified
+against live Discord by the acceptance suite rather than taken on trust. Advisories that surface in transitive dependencies are
 resolved this way, not annotated as unreachable and left in place.
 
 The published package contains only the
@@ -119,12 +127,16 @@ controls OWASP recommends and the layers a server should rely on:
   content always arrives inside a typed field (`data.messages[].content`
   and similar), separated from the tool's own one-line summary, so the
   framing is "here is data" rather than free text.
-- Every destructive action requires explicit human approval. The
-  confirmation gate means that even a fully hijacked client cannot delete,
-  ban, kick, prune, or bulk-act without a human seeing a preview and
-  passing back a one-time token. This is the backstop: injection can
-  mislead the model, but it cannot reach through to irreversible harm
-  without a person in the loop.
+- Every destructive action stops at a preview first. Even a fully
+  hijacked client cannot delete, ban, kick, prune, or bulk-act on its
+  first call: it gets a preview and a one-time token bound to exactly that
+  action. Where the app can show a form (MCP elicitation), the call with
+  the token opens a confirmation dialog the model can neither answer nor
+  skip, so injection can mislead the model but cannot reach through to
+  irreversible harm without a person. Where the app cannot show one, the
+  model holds the token, and a misled model could confirm on its own.
+  `DISCORD_MCP_CONFIRM=dialog` refuses destructive actions in such apps,
+  and the app's own per-tool approval is the other layer.
 - Mentions are suppressed by default on every message-sending path, so an
   injected payload cannot turn the bot into a mass-ping vector. The audit
   found two send paths (native polls and new forum posts) that had missed
@@ -153,7 +165,7 @@ Every state change discord-mcp makes on Discord carries an audit-log reason,
 so actions are attributable in Discord's own audit log. The
 `get_audit_log` tool surfaces that log with readable action names. The
 rate-limit observer and gateway state are inspectable through diagnostics
-tools. Deeper structured telemetry is on the roadmap.
+tools.
 
 ### MCP09 Shadow MCP Servers
 
@@ -188,9 +200,13 @@ attacking it:
   the preview names the acting bot and server, a wrong-target backstop that
   surfaces a misrouted action before it runs.
 - Tokens are single use (deleted on redemption) and expire after two
-  minutes.
+  minutes (ten for undo).
 - Tokens live only in the process that issued them, so one cannot be
   replayed against a different server instance.
+- A token proves the action is the one previewed, not that a person
+  approved it. In an app that shows the confirmation dialog, the person
+  approves there; in one that does not, the model could, which is what
+  `DISCORD_MCP_CONFIRM=dialog` is for.
 
 Safe mode is on by default and can be disabled per deployment only by an
 operator who controls the environment, never by the model.
@@ -205,7 +221,7 @@ operator who controls the environment, never by the model.
 | Bot token handling | Pass | Verified never logged, returned, or accepted as an argument |
 | HTTP authentication and DNS-rebinding defenses | Pass | Verified by the HTTP security test suite |
 | Dependency vulnerabilities | Pass | `npm audit` reports zero |
-| Confirmation gate design | Pass | Reviewed adversarially; sound |
+| Confirmation gate design | Pass | Reviewed adversarially; in apps without a confirmation dialog the model holds the token (see MCP06) |
 
 ## Operator guidance
 
@@ -217,3 +233,11 @@ operator who controls the environment, never by the model.
 - Treat the `.env` file and the data directory as secrets at rest.
 - Per-tool approval in the AI client is a useful additional layer; enable
   it for write and delete tools.
+- For an assistant that only needs to read, set `DISCORD_MCP_READ_ONLY=true`.
+  For an install meant for one server, set `DISCORD_MCP_ALLOWED_SERVERS`.
+- Outbound connections are Discord's API and CDN, public links a caller asks
+  it to fetch a file from, the npm registry for the
+  daily version check (`DISCORD_MCP_UPDATE_CHECK=false` stops it), and
+  `telemetry.orygn.tech` for the anonymous daily usage report
+  (`DISCORD_MCP_TELEMETRY=off` or `DO_NOT_TRACK=1` stops it). See
+  [docs/privacy.md](docs/privacy.md).

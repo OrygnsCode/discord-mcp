@@ -23,8 +23,8 @@ import { extrasOf, gateBitsForType, readSugar } from "./overwrites.js";
 // live item with that id, so a different name is a rename. Without an id,
 // or with an id this server does not have, it binds by name, the way
 // builds always have. Channel names only collide within a family: Discord
-// keeps text and voice namespaces separate, and treating them as one once
-// matched a blueprint's text general to the server's voice General.
+// keeps text and voice namespaces separate, and treating them as one would
+// match a blueprint's text general to the server's voice General.
 
 export type ChannelTypeName = "text" | "voice" | "forum" | "stage" | "announcement";
 

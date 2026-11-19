@@ -233,8 +233,7 @@ export function registerAutomodTools(
       }
 
       // Exempt roles and channels by name or id, like every other
-      // reference. They used to go to Discord as written, so a name was
-      // refused as an invalid id.
+      // reference. Discord itself takes only ids.
       const exemptRoleIds: string[] = [];
       if (exempt_roles?.length) {
         const roles = await getRoles(rest, guildId);

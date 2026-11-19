@@ -48,7 +48,7 @@ selected, minus the payload of `core` alone.
 | Group | Tools | Size | What it covers |
 |---|---|---|---|
 | `core` | 15 | 11.6 KB | Always on. Diagnostics, setup check, server and channel and role listings, message and member search, `find`, `catch_up`. |
-| `messaging` | 21 | 29.2 KB | Sending (with files), editing, replies, DMs, reactions, polls, pins, scheduled messages. |
+| `messaging` | 21 | 29.4 KB | Sending (with files), editing, replies, DMs, reactions, polls, pins, scheduled messages. |
 | `moderation` | 17 | 17.9 KB | Bans, kicks, timeouts, prune, the audit log, raid actions, AutoMod rules. |
 | `structure` | 28 | 33.1 KB | Channels, roles, and permission overwrites, including locking and cloning, undoing any recorded change, and the security review with its who-can-reach views. |
 | `builder` | 11 | 31.0 KB | Planning a server from a brief or a template link, editing an existing one, executing plans, blueprints and diffs. |
@@ -65,20 +65,25 @@ bytes each:
 
 | Setting | Tools | Payload | Tokens | Saved |
 |---|---|---|---|---|
-| unset (everything) | 164 | 188,326 B | ~47,100 | |
+| unset (everything) | 164 | 188,445 B | ~47,100 | |
 | `core` only | 15 | 11,858 B | ~3,000 | 94% |
-| `messaging` | 36 | 41,808 B | ~10,500 | 78% |
+| `messaging` | 36 | 41,927 B | ~10,500 | 78% |
 | `builder` | 26 | 43,603 B | ~10,900 | 77% |
-| `messaging,moderation` | 53 | 60,157 B | ~15,000 | 68% |
-| `messaging,moderation,structure` | 81 | 94,041 B | ~23,500 | 50% |
+| `messaging,moderation` | 53 | 60,276 B | ~15,100 | 68% |
+| `messaging,moderation,structure` | 81 | 94,160 B | ~23,500 | 50% |
+| `DISCORD_MCP_READ_ONLY=true` | 60 | 48,872 B | ~12,200 | 74% |
+| read-only with `messaging,moderation` | 24 | 18,002 B | ~4,500 | 90% |
 
 ## Choosing a set
 
 - **Running a community day to day**: `messaging,moderation`.
 - **Building or restructuring a server**: `builder,structure`.
 - **A bot that only posts**: `messaging`.
-- **Read only, for reporting**: `core` on its own. The security review is in
-  `structure`.
+- **Read only, for reporting**: `DISCORD_MCP_READ_ONLY=true`. It keeps every
+  lookup, the security review included, and drops everything that changes
+  something, at about a quarter of the full size. It combines with
+  `DISCORD_MCP_TOOLS`: read-only applies to whichever groups are loaded.
+  `core` on its own is smaller still.
 - **Not sure**: leave it unset. Nothing breaks; you carry the whole surface.
 
 Groups are assigned per tool, not per source file, so a group holds what you
@@ -95,7 +100,7 @@ In stdio mode the startup line on stderr also names the active groups, so you
 can confirm what a session loaded:
 
 ```
-discord-mcp v2.0.0 on stdio (toolsets: core, messaging, moderation)
+discord-mcp v2.1.0 on stdio (toolsets: core, messaging, moderation)
 ```
 
 ## Adding a tool

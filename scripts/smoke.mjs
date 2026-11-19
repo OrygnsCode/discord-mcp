@@ -22,6 +22,7 @@ const entry = join(root, "dist", "index.js");
 // touch the real one.
 const env = { ...process.env };
 env.DISCORD_TOKEN = "";
+env.DISCORD_MCP_TELEMETRY = "off";
 env.DISCORD_MCP_GUILD = "";
 env.DISCORD_MCP_DATA_DIR = join(tmpdir(), `discord-mcp-smoke-${Date.now()}`);
 
@@ -251,6 +252,10 @@ try {
   assert(delCmdMeta?.annotations?.destructiveHint === true, "delete_app_command carries destructiveHint");
   const listCmdMeta = (tools.result?.tools ?? []).find((t) => t.name === "list_app_commands");
   assert(listCmdMeta?.annotations?.readOnlyHint === true, "list_app_commands is read only");
+  // Read-only mode keeps a tool only when it says it changes nothing, so every
+  // tool has to say one way or the other.
+  const unmarked = (tools.result?.tools ?? []).filter((t) => typeof t.annotations?.readOnlyHint !== "boolean").map((t) => t.name);
+  assert(unmarked.length === 0, `every tool says whether it changes anything (unmarked: ${unmarked.join(", ") || "none"})`);
 
   assert(names.length >= 155, `tool count is at least 155 (got ${names.length})`);
 
@@ -296,8 +301,8 @@ try {
   // The catalog is the contract people read. Every tool has a row, the D
   // column says how the tool really behaves, each row names every
   // parameter the tool takes, and a list of accepted values is the real
-  // list. Rows that drifted from the code have claimed confirmations that
-  // did not exist and values no tool accepted.
+  // list. A row that drifts from the code can claim a confirmation that
+  // does not exist or a value no tool accepts.
   {
     const catalog = readFileSync(join(root, "docs", "tool-catalog.md"), "utf8").replace(/\r\n/g, "\n");
     const rows = new Map();
@@ -506,12 +511,12 @@ try {
   mkdirSync(dirname(cursorPath), { recursive: true });
   writeFileSync(
     desktopPath,
-    JSON.stringify({ mcpServers: { omnicord: { command: "node", args: ["old-copy.js"] }, kali: { command: "python" } } })
+    JSON.stringify({ mcpServers: { omnicord: { command: "node", args: ["old-copy.js"] }, notes: { command: "python" } } })
   );
   const cursorBefore = JSON.stringify({
     mcpServers: {
       omnicord: { command: "npx", args: ["-y", "@orygn/omnicord"] },
-      "discord-mcp": { command: "npx", args: ["-y", "@discord-mcp/cli"] },
+      "discord-mcp": { command: "npx", args: ["-y", "@someone/discord-mcp-cli"] },
     },
   });
   writeFileSync(cursorPath, cursorBefore);
@@ -560,7 +565,7 @@ try {
     desktopAfter.mcpServers["discord-mcp"]?.args?.[0] === entry && !("omnicord" in desktopAfter.mcpServers),
     "upgrade: Desktop's old entry is replaced by one pointing at this copy"
   );
-  assert(desktopAfter.mcpServers.kali?.command === "python", "upgrade: other servers in the file survive");
+  assert(desktopAfter.mcpServers.notes?.command === "python", "upgrade: other servers in the file survive");
   assert(backups.length === 1, "upgrade: Desktop's file was backed up first");
   assert(answeredForeign && upPlain.includes("We're a little biased about which."), "upgrade: asks before replacing someone else's discord-mcp");
   assert(cursorAfter === cursorBefore, "upgrade: answering no leaves that file exactly as it was");

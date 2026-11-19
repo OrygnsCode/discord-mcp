@@ -18,10 +18,16 @@ FROM node:24-alpine
 RUN addgroup -S discord-mcp && adduser -S discord-mcp -G discord-mcp
 WORKDIR /app
 ENV NODE_ENV=production \
-    DISCORD_MCP_HTTP_HOST=0.0.0.0
+    DISCORD_MCP_HTTP_HOST=0.0.0.0 \
+    DISCORD_MCP_PACKAGING=docker
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
+# The data folder (build plans, change records, saved blueprints, scheduled
+# messages). /app belongs to root, so the server could not create it. Made
+# here and owned by the server's user, it works with no volume, and a named
+# volume mounted on it takes that owner.
+RUN mkdir -p /app/.discord-mcp && chown discord-mcp:discord-mcp /app/.discord-mcp
 USER discord-mcp
 EXPOSE 3414
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

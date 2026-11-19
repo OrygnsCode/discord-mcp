@@ -3,12 +3,13 @@ import { quoted } from "./discord/names.js";
 import { fail, withWarning } from "./envelope.js";
 import { setting } from "./settings.js";
 
-// A tool's input schema strips what it does not declare, so a parameter a
-// tool does not have used to vanish without a word, and the call ran as if
-// it had never been passed. The worst case is dry_run: some tools take it,
-// and on the rest a call marked as a rehearsal ran for real. The same goes
-// one level down: a channel in a blueprint written with private: true, a
-// key a channel does not have, was built for everyone to see.
+// A tool's input schema strips what it does not declare, so without this
+// check a parameter a tool does not have would vanish without a word, and
+// the call would run as if it had never been passed. The worst case is
+// dry_run: some tools take it, and on the rest a call marked as a rehearsal
+// would run for real. The same goes one level down: a channel in a
+// blueprint written with private: true, a key a channel does not have,
+// would be built for everyone to see.
 //
 // The check sits between the SDK and every tool (see buildServer). A tool
 // that changes something refuses the call. A tool that only reads answers,
@@ -16,7 +17,7 @@ import { setting } from "./settings.js";
 
 // Keys some hosts add to every tool call on their own. n8n's AI Agent sends
 // these four with each call; they say nothing about what the tool should
-// do, so they are dropped as before.
+// do, so they are dropped.
 const HOST_KEYS: ReadonlySet<string> = new Set(["sessionId", "action", "chatInput", "toolCallId"]);
 
 // Tools marked read-only that refuse all the same, because what they hand

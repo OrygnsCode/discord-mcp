@@ -6,15 +6,14 @@ import { basename, dirname, join, relative } from "node:path";
 //
 // `npx @orygn/discord-mcp init` runs the wizard out of npm's npx cache, a
 // folder npm treats as disposable: `npm cache npx rm` empties it, and so
-// does deleting the npm cache folder or a disk cleanup tool. The wizard
-// used to register that path with the AI client as-is, so the client
-// worked until the folder went away and then failed on every start with
-// "Cannot find module", which desktop clients show as "Server
-// disconnected". It also froze the client on whatever version npx had
-// fetched, because nothing ever updates that folder.
+// does deleting the npm cache folder or a disk cleanup tool. A client
+// entry naming that path works until the folder goes away, then fails on
+// every start with "Cannot find module", which desktop clients show as
+// "Server disconnected", and stays on whatever version npx fetched, because
+// nothing updates that folder.
 //
-// The wizard now copies the package out of the cache before registering
-// it, and the server warns at startup when a client still points into the
+// So the wizard copies the package out of the cache before registering it,
+// and the server warns at startup when a client still points into the
 // cache. `npm cache clean --force` is not one of the causes: it removes
 // only npm's _cacache folder and leaves _npx alone.
 

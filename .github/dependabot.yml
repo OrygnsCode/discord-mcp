@@ -4,8 +4,6 @@ updates:
     directory: '/'
     schedule:
       interval: monthly
-      time: '09:00'
-      timezone: 'America/Chicago'
     open-pull-requests-limit: 10
     groups:
       # Majors are deliberately excluded from the grouped PRs. A single breaking

@@ -829,7 +829,7 @@ export function registerManageTools(
       title: "Pin message",
       description:
         "Pin a message in a channel. Needs the Pin Messages permission " +
-        "(split from Manage Messages in 2026). Channels hold at most 50 pins.",
+        "(split from Manage Messages in 2026). Channels hold at most 250 pins.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
@@ -922,7 +922,7 @@ export function registerManageTools(
       );
 
       // Discord hands pins out 50 at a time and a channel can hold 250, so
-      // every page is read; the first used to be given as all of them.
+      // every page is read.
       const items: Array<{ pinned_at: string; message: APIMessage }> = [];
       let before: string | undefined;
       let more = false;

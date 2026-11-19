@@ -18,7 +18,8 @@ reads and that the path to `dist/index.js` is correct and absolute.
 - Missing: there is no `DISCORD_TOKEN`. Put it in a `.env` file next to the
   package (source checkouts), in `.orygn/discord-mcp/.env` in your user folder
   (installed copies; the wizard writes it there), or in the client's
-  server configuration environment.
+  server configuration environment. With the Claude Desktop bundle, it goes
+  in the extension's settings; see below.
 - Invalid: Discord rejected the token. It is wrong, expired, or was reset.
   Generate a fresh one on the Bot page in the Developer Portal and update
   `DISCORD_TOKEN`.
@@ -46,7 +47,7 @@ channels for name clashes, so the plan warns when any exist.
 
 ## The bot shows as offline
 
-If you are using the default (gateway on), the bot shows online whenever an
+If you are using the default (gateway on), the bot shows online whenever a
 discord-mcp process is running and connected. A short delay at startup is
 normal while it connects. If it stays offline, run a setup check and read
 the gateway line. Note that the bot can still do everything over REST even
@@ -152,6 +153,31 @@ client**), and fully restart the client. The wizard copies the program to
 recur. A setup that still works but points
 into the npx cache gets an `install_location` warning from the setup check,
 so you can fix it before it breaks.
+
+## The Claude Desktop bundle
+
+- Double-clicking `discord-mcp.mcpb` opens a "Pick an app" box: that Windows
+  install has nothing registered for the file type. Drag the file onto
+  Settings > Desktop app > Extensions (Manage) instead.
+- The tools say there is no token although you saved one: Claude ignores the
+  "Save these settings?" box if its window loses focus while the box is open,
+  and keeps the old settings. Open Settings > Desktop app > Extensions >
+  Discord MCP, enter the token again, save, and answer the box with Claude in
+  front.
+- The tools do not appear after setting it up: check that the extension is
+  switched on at the top of its page. Saving the settings does not switch it
+  on.
+
+## It stopped starting after I set read-only mode or allowed servers
+
+discord-mcp refuses to start when it cannot read `DISCORD_MCP_READ_ONLY` or
+`DISCORD_MCP_ALLOWED_SERVERS`, rather than run without the limit you meant
+to set. The reason is the last line it prints: in Claude Desktop, in the log
+for the server (Settings, Developer, or the extension's page). Common causes:
+a server name instead of its id (enable Developer Mode in Discord, then
+right-click the server and Copy Server ID), a read-only value it does not
+recognise (use `true` or `false`), or a default server (`DISCORD_MCP_GUILD`)
+that is not in the allowed list.
 
 ## The HTTP server refuses to start
 

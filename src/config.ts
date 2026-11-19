@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { selectToolsets, type ToolsetSelection } from "./toolsets.js";
 import { installedHome, IS_INSTALLED, PACKAGE_ROOT } from "./home.js";
 import { setting } from "./settings.js";
+import { loadRestrictions } from "./restrictions.js";
+import { withoutBom } from "./textFiles.js";
 
 // Where the token and settings are read from. One place per kind of copy,
 // the same place the wizard writes to (see configDir in home.ts):
@@ -72,9 +74,8 @@ export interface ServerConfig {
   // Every configured bot. Empty when no token is set anywhere.
   bots: BotConfig[];
   // The default bot's token, or undefined when nothing is configured. Kept
-  // as a top-level field so the existing single-bot call sites (getRest,
-  // the gateway, the scheduler, the boot banners) keep working unchanged
-  // while the multi-bot routing is built on top of `bots`.
+  // as a top-level field for the call sites that use only the default bot
+  // (getRest, the gateway, the scheduler, the boot banners).
   token: string | undefined;
   // Optional default guild ID. Tools accept an explicit guild and fall
   // back to this.
@@ -87,6 +88,13 @@ export interface ServerConfig {
   // unset means every group. Carries any unknown group names so the entry
   // point can refuse to start instead of quietly exposing fewer tools.
   toolsets: ToolsetSelection;
+  // DISCORD_MCP_READ_ONLY and DISCORD_MCP_ALLOWED_SERVERS, see
+  // restrictions.ts. Optional so configs built in tests stay valid; absent
+  // means no restriction.
+  readOnly?: boolean;
+  allowedServers?: ReadonlySet<string>;
+  // Why those settings cannot be used. Non-empty stops the server at start.
+  restrictionProblems?: string[];
 }
 
 // Shape of a bots.json file. Hand-editable, and also written by the wizard.
@@ -148,8 +156,8 @@ export function buildBots(
   }
   if (defaultIdx === -1) defaultIdx = 0;
 
-  // Make names unique so later phases can select a bot by name with no
-  // ambiguity, without discarding the user's chosen label.
+  // Make names unique so a bot can be selected by name with no ambiguity,
+  // without discarding the user's chosen label.
   const usedNames = new Set<string>();
   return collected.map((b, i) => {
     let name = b.name;
@@ -204,11 +212,11 @@ function readBotsFile(): { file: RawBotsFile; path: string } | undefined {
     const path = join(folder, "bots.json");
     if (!existsSync(path)) continue;
     try {
-      return { file: JSON.parse(readFileSync(path, "utf8")) as RawBotsFile, path };
+      return { file: JSON.parse(withoutBom(readFileSync(path, "utf8"))) as RawBotsFile, path };
     } catch (err) {
       // A malformed bots.json must not crash the server, and must not write
       // to stdout (that breaks the stdio transport). Warn on stderr and fall
-      // back to whatever else is configured; diagnostics can flag it later.
+      // back to whatever else is configured.
       console.error(
         `[discord-mcp] Ignoring ${path}: not valid JSON (${(err as Error).message}).`
       );
@@ -229,5 +237,15 @@ export function loadConfig(): ServerConfig {
   const defaultBot = bots.find((b) => b.isDefault);
   const defaultGuild = setting("GUILD");
   const toolsets = selectToolsets(setting("TOOLS"));
-  return { bots, token: defaultBot?.token, defaultGuild, serverBots: buildServerBots(found?.file, bots), toolsets };
+  const restrictions = loadRestrictions(process.env, defaultGuild);
+  return {
+    bots,
+    token: defaultBot?.token,
+    defaultGuild,
+    serverBots: buildServerBots(found?.file, bots),
+    toolsets,
+    readOnly: restrictions.readOnly,
+    allowedServers: restrictions.allowedServers,
+    restrictionProblems: restrictions.problems,
+  };
 }

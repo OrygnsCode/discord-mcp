@@ -1,6 +1,6 @@
 import { VERSION, type ServerConfig } from "./config.js";
 import { IS_INSTALLED, dataDir } from "./home.js";
-import { startUpdateCheck } from "./updateCheck.js";
+import { checksForUpdates, startUpdateCheck } from "./updateCheck.js";
 
 // When the background work starts: the Discord gateway connection and the
 // message scheduler.
@@ -79,10 +79,19 @@ export async function startBackgroundWork(config: ServerConfig): Promise<void> {
   const { startGateway } = await import("./discord/gateway.js");
   void startGateway(config);
   // The scheduler catches up anything that came due while the process was
-  // down, then fires the rest on time.
-  const { startScheduler } = await import("./scheduler.js");
-  startScheduler(config);
+  // down, then fires the rest on time. Read-only mode posts nothing, so it
+  // does not run there: queued messages wait for an install that may send.
+  if (config.readOnly) {
+    console.error("discord-mcp: read-only mode, so queued messages are not sent; they stay queued.");
+  } else {
+    const { startScheduler } = await import("./scheduler.js");
+    startScheduler(config);
+  }
+  // Usage stats: counting starts, and the daily report goes out on the
+  // first call of a day that reaches Discord (see usageReport.ts).
+  const { startUsageReport } = await import("./usageReport.js");
+  startUsageReport(config);
   // Whether a newer version is out, asked of npm at most once a day and
   // never waited for (see updateCheck.ts).
-  void startUpdateCheck({ current: VERSION, dir: dataDir(), installed: IS_INSTALLED });
+  void startUpdateCheck({ current: VERSION, dir: dataDir(), installed: checksForUpdates(process.env, IS_INSTALLED) });
 }

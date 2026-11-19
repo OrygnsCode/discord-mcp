@@ -3,8 +3,9 @@ import { channelLabel } from "../discord/grants.js";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type { APIMessage, APIChannel } from "discord-api-types/v10";
 import type { McpServer } from "@modelcontextprotocol/server";
+import type { REST } from "@discordjs/rest";
 import type { ServerConfig } from "../config.js";
-import { gateDestructive } from "../safety.js";
+import { gateDestructive, gateKeeping, keptFor } from "../safety.js";
 import { quoted } from "../discord/names.js";
 import {
   saveSchedule,
@@ -200,7 +201,9 @@ export function registerMessagingTools(
         "filtered by author or text. Discord cannot bulk delete messages " +
         "older than 14 days. Safe to call directly: the first call returns " +
         "how many it would remove, with a sample of them, plus a " +
-        "confirm_token; repeating the call with the token deletes them.",
+        "confirm_token; repeating the call with the token deletes those same " +
+        "messages. Messages posted after the preview are left alone, so it " +
+        "works in a busy channel, such as during a raid.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
@@ -226,14 +229,10 @@ export function registerMessagingTools(
         `in ${channelLabel(target)}`
       );
 
-      const recent = (await rest.get(Routes.channelMessages(target.id), {
-        query: new URLSearchParams({ limit: String(count ?? 50) }),
-      })) as APIMessage[];
-
-      const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      const cutoff = Date.now() - BULK_DELETE_MAX_AGE_MS;
       const authorNeedle = from_author?.toLowerCase();
       const textNeedle = contains?.toLowerCase();
-      const eligible = recent.filter((m) => {
+      const matches = (m: APIMessage): boolean => {
         if (new Date(m.timestamp).getTime() < cutoff) return false;
         if (
           authorNeedle &&
@@ -246,37 +245,85 @@ export function registerMessagingTools(
           return false;
         }
         return true;
-      });
+      };
+      const where =
+        channelLabel(target) +
+        (from_author ? ` from ${quoted(from_author)}` : "") +
+        (contains ? ` containing ${quoted(contains)}` : "");
+      const filtered = from_author !== undefined || contains !== undefined;
 
-      if (eligible.length === 0) {
-        return ok(
-          "No messages in range match those filters (Discord cannot bulk " +
-            "delete messages older than 14 days).",
-          { deleted: 0 }
-        );
+      // The token is bound to the request, not to the messages: in a busy
+      // channel the newest messages change between the preview and the
+      // confirmation, and a token bound to them would be refused every time,
+      // which is when this tool is needed most. What the preview showed is kept
+      // with the token instead, and confirming deletes that and nothing else.
+      const bound = { channel: target.id, count: count ?? 50, from_author: from_author ?? null, contains: contains ?? null };
+
+      // Confirming: the preview's messages, as far as they are still there.
+      const previewed = asPreviewed(keptFor(confirm_token, BULK_DELETE, bound));
+      let recheck: Recheck | undefined;
+      let planned: APIMessage[];
+      let newest: string | undefined;
+      if (previewed) {
+        recheck = await recheckPreviewed(rest, target.id, previewed, matches);
+        planned = recheck.still;
+        if (planned.length === 0) {
+          return ok(
+            `None of the ${previewed.ids.length} message(s) the preview showed are left to delete` +
+              leftAloneText(recheck, filtered, "open") +
+              " Nothing was deleted.",
+            { deleted: 0, left_alone: leftAloneData(recheck) }
+          );
+        }
+      } else {
+        const recent = (await rest.get(Routes.channelMessages(target.id), {
+          query: new URLSearchParams({ limit: String(count ?? 50) }),
+        })) as APIMessage[];
+        planned = recent.filter(matches);
+        newest = newestId(recent);
+        if (planned.length === 0) {
+          return ok(
+            "No messages in range match those filters (Discord cannot bulk " +
+              "delete messages older than 14 days).",
+            { deleted: 0 }
+          );
+        }
       }
 
-      const ids = eligible.map((m) => m.id);
-      const gate = gateDestructive({
-        tool: "bulk_delete_messages",
-        args: { channel: target.id, ids: ids.join(",") },
+      const outcome = gateKeeping({
+        tool: BULK_DELETE,
+        args: bound,
         dryRun: dry_run,
         confirmToken: confirm_token,
-        previewSummary:
-          `Would delete ${ids.length} message(s) in ${channelLabel(target)}` +
-          (from_author ? ` from ${quoted(from_author)}` : "") +
-          (contains ? ` containing ${quoted(contains)}` : "") +
-          ". This cannot be undone.",
+        previewSummary: previewed
+          ? `Would delete the ${planned.length} message(s) in ${where} that the preview showed.` +
+            leftAloneText(recheck!, filtered, "will") +
+            " This cannot be undone."
+          : `Would delete ${planned.length} message(s) in ${where}. This cannot be undone.`,
+        note: previewed ? undefined : "Confirming deletes these messages only: any posted after this preview are left alone.",
         previewDetails: {
-          count: ids.length,
-          sample: eligible.slice(0, 5).map((m) => ({
+          count: planned.length,
+          sample: planned.slice(0, 5).map((m) => ({
             author: m.author.username,
             excerpt: (m.content ?? "").slice(0, 60),
           })),
+          ...(recheck ? { left_alone: leftAloneData(recheck) } : {}),
         },
+        keep: previewed ? undefined : { ids: planned.map((m) => m.id), newest: newest ?? planned[0].id },
       });
-      if (gate) return gate;
+      if (outcome.answer) return outcome.answer;
 
+      // Going ahead. With safe mode off nothing was kept, and the messages
+      // are the ones that match now. Otherwise they are the preview's.
+      const kept = asPreviewed(outcome.kept);
+      if (kept && kept !== previewed) {
+        recheck = await recheckPreviewed(rest, target.id, kept, matches);
+        planned = recheck.still;
+      }
+      if (planned.length === 0) {
+        return ok("Nothing was left to delete.", { deleted: 0, ...(recheck ? { left_alone: leftAloneData(recheck) } : {}) });
+      }
+      const ids = planned.map((m) => m.id);
       if (ids.length === 1) {
         await rest.delete(Routes.channelMessage(target.id, ids[0]));
       } else {
@@ -285,9 +332,10 @@ export function registerMessagingTools(
           reason: "Bulk delete via discord-mcp",
         });
       }
-      return ok(`Deleted ${ids.length} message(s) in ${channelLabel(target)}.`, {
-        deleted: ids.length,
-      });
+      return ok(
+        `Deleted ${ids.length} message(s) in ${channelLabel(target)}.` + (recheck ? leftAloneText(recheck, filtered, "were") : ""),
+        { deleted: ids.length, ...(recheck ? { left_alone: leftAloneData(recheck) } : {}) }
+      );
     })
   );
 
@@ -331,8 +379,8 @@ export function registerMessagingTools(
         "community event members can RSVP to, use create_event. This server " +
         "sends it when the time comes. One limit worth " +
         "knowing: delivery needs this server to be running at " +
-        "that moment, so always-on scheduling wants the hosted or Docker " +
-        "deployment rather than a laptop that sleeps. A message that came " +
+        "that moment, so always-on scheduling needs a machine or container " +
+        "that stays up rather than a laptop that sleeps. A message that came " +
         "due during downtime is sent at the next start.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
@@ -359,8 +407,7 @@ export function registerMessagingTools(
       if ((repeat ?? "none") === "none" && when.getTime() <= Date.now()) {
         return fail("send_at is in the past. Pick a future time.");
       }
-      // A repeat given a past start begins at its next time. Before, it
-      // posted within half a minute of being scheduled.
+      // A repeat given a past start begins at its next time.
       if ((repeat ?? "none") !== "none") {
         const step = repeat === "daily" ? 86_400_000 : 604_800_000;
         const behind = Date.now() - when.getTime();
@@ -461,4 +508,107 @@ export function registerMessagingTools(
       return ok(`Canceled scheduled message ${schedule_id}.`, { canceled: true });
     })
   );
+}
+
+// Bulk deletion: what a preview keeps with its token, and how the
+// confirmation finds which of those messages are still there to delete.
+
+const BULK_DELETE = "bulk_delete_messages";
+const BULK_DELETE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+// The previewed message ids, and the newest message the preview saw, so
+// anything newer is known to have arrived since.
+interface Previewed {
+  ids: string[];
+  newest: string;
+}
+
+interface Recheck {
+  still: APIMessage[];
+  gone: number;
+  changed: number;
+  later: number;
+  laterCapped: boolean;
+}
+
+function asPreviewed(value: unknown): Previewed | undefined {
+  const v = value as Previewed | undefined;
+  return v && Array.isArray(v.ids) && v.ids.length > 0 && typeof v.newest === "string" ? v : undefined;
+}
+
+function newestId(messages: APIMessage[]): string | undefined {
+  let best: string | undefined;
+  for (const m of messages) if (best === undefined || BigInt(m.id) > BigInt(best)) best = m.id;
+  return best;
+}
+
+// One page read forward from just before the oldest previewed message.
+// Message ids grow with time, and the preview read at most 100 messages, so
+// that page holds every previewed message still there, whatever has been
+// posted since; anything newer than the preview's newest arrived later.
+async function recheckPreviewed(
+  rest: REST,
+  channelId: string,
+  previewed: Previewed,
+  matches: (m: APIMessage) => boolean
+): Promise<Recheck> {
+  let oldest = BigInt(previewed.ids[0]);
+  for (const id of previewed.ids) if (BigInt(id) < oldest) oldest = BigInt(id);
+  const page = (await rest.get(Routes.channelMessages(channelId), {
+    query: new URLSearchParams({ after: (oldest - 1n).toString(), limit: "100" }),
+  })) as APIMessage[];
+  const byId = new Map(page.map((m) => [m.id, m]));
+  const still: APIMessage[] = [];
+  let gone = 0;
+  let changed = 0;
+  for (const id of previewed.ids) {
+    const m = byId.get(id);
+    if (!m) gone += 1;
+    else if (!matches(m)) changed += 1;
+    else still.push(m);
+  }
+  const newest = BigInt(previewed.newest);
+  const later = page.filter((m) => BigInt(m.id) > newest && matches(m)).length;
+  return { still, gone, changed, later, laterCapped: page.length >= 100 };
+}
+
+function leftAloneData(r: Recheck): Record<string, number> {
+  return {
+    ...(r.later > 0 ? { posted_after_preview: r.later } : {}),
+    ...(r.gone > 0 ? { already_gone: r.gone } : {}),
+    ...(r.changed > 0 ? { no_longer_match: r.changed } : {}),
+  };
+}
+
+// The messages left alone, as sentences after the main one.
+//   open:  after "None of the N the preview showed are left to delete"
+//   will:  in the confirmation, which the dialog shows the user, so it
+//          states what happens and gives the model no instructions
+//   were:  in the result, which says how to get the newer ones too
+function leftAloneText(r: Recheck, filtered: boolean, mode: "open" | "will" | "were"): string {
+  // After "None of the N the preview showed", the count alone says which.
+  const of = mode === "open" ? "" : " of the previewed messages";
+  const parts: string[] = [];
+  if (r.gone > 0) parts.push(`${r.gone}${of} ${r.gone === 1 ? "is" : "are"} already gone`);
+  if (r.changed > 0) {
+    parts.push(`${r.changed}${of} no longer ${r.changed === 1 ? "matches" : "match"} (edited, or now older than 14 days)`);
+  }
+  let text =
+    mode === "open"
+      ? parts.length > 0 ? `: ${parts.join("; ")}.` : "."
+      : parts.length > 0 ? ` ${capitalize(parts.join("; "))}.` : "";
+  if (r.later > 0) {
+    const what = filtered ? "matching message(s)" : "message(s)";
+    const count = `${r.laterCapped ? "At least " : ""}${r.later} ${what} posted after the preview`;
+    const one = r.later === 1 && !r.laterCapped;
+    text +=
+      mode === "will"
+        ? ` ${count} ${one ? "is" : "are"} left alone.`
+        : ` ${count} ${one ? "was" : "were"} left alone; call again without a confirm_token for a fresh preview that includes them.`;
+  }
+  return text;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }

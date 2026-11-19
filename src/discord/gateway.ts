@@ -58,9 +58,8 @@ export function getPortalIntents(): IntentStatus | undefined {
 }
 
 // Close codes after which Discord does not let a connection come back, so
-// nothing reconnects. They used to leave the state at "connecting" for the
-// life of the process, and the setup check kept saying events would start
-// shortly.
+// nothing reconnects, and the state says so instead of staying at
+// "connecting".
 const FINAL_CLOSE: Record<number, string> = {
   4004: "Discord rejected the bot token. It was reset or is wrong; update DISCORD_TOKEN and restart.",
   4010: "Discord rejected the shard this connection asked for.",
@@ -82,11 +81,9 @@ export function stateAfterClose(code: number, current: GatewayState): GatewaySta
 }
 
 // The state a resumed connection leaves behind. A dropped connection that
-// Discord lets resume sends no second Ready, only Resumed, and nothing
-// listened for it: from the first drop on, the state read "connecting" for
-// the life of the process. The bot was online and events kept arriving, but
-// its status could not be changed and cached structure was no longer
-// treated as current.
+// Discord lets resume sends no second Ready, only Resumed, so this marks
+// the connection current again. Without it the state would read
+// "connecting" from the first drop on, while the bot stayed online.
 export function stateAfterResume(
   current: GatewayState,
   intents: IntentStatus,

@@ -26,6 +26,9 @@ export const SETTING_NAMES = [
   "ALLOW_PRIVATE_URLS",
   "UPDATE_CHECK",
   "STRICT_PARAMS",
+  "READ_ONLY",
+  "ALLOWED_SERVERS",
+  "TELEMETRY",
 ] as const;
 
 export type SettingName = (typeof SETTING_NAMES)[number];

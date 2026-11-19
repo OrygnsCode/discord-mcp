@@ -2,11 +2,12 @@ import { REST, RateLimitError, type RateLimitData } from "@discordjs/rest";
 import type { ServerConfig } from "../config.js";
 import { assertRouteMatchesLinks } from "./messageLinks.js";
 import { attachRateLimitObserver } from "./rateLimit.js";
+import { noteDiscordReached } from "../usageStats.js";
+import { BUNDLE_SETTINGS, packagedAs } from "../packaging.js";
 
 // Thin wrapper around the Discord REST client. @discordjs/rest already
 // queues requests per route bucket and honors the rate limit headers, so
-// for now we lean on that. The catalog's circuit breaker for invalid
-// requests gets layered on top in a later phase.
+// this relies on that.
 //
 // One REST client is built per bot token and reused. @discordjs/rest keeps
 // its rate-limit buckets inside each instance, so a separate client per
@@ -78,9 +79,11 @@ export function assertSafeRoute(route: string): void {
 export class NoTokenError extends Error {
   constructor() {
     super(
-      "No Discord bot token configured. Set DISCORD_TOKEN in the MCP server " +
-        "config or in a .env file next to the server. Tokens come from " +
-        "https://discord.com/developers/applications under your app's Bot page."
+      (packagedAs() === "mcpb"
+        ? `No Discord bot token yet. In Claude, open ${BUNDLE_SETTINGS}, paste it into "Discord bot token" and save. `
+        : "No Discord bot token configured. Set DISCORD_TOKEN in the MCP server " +
+          "config or in a .env file next to the server. ") +
+        "Tokens come from https://discord.com/developers/applications under your app's Bot page."
     );
     this.name = "NoTokenError";
   }
@@ -91,15 +94,20 @@ export function getRestForToken(token: string): REST {
   let rest = restByToken.get(token);
   if (!rest) {
     // The library reports invalid requests (401, 403, 429) only when given
-    // an interval, and its default is never. get_rate_limit_status showed a
-    // counter that could not move; every one is reported now.
+    // an interval, and its default is never. An interval of 1 reports every
+    // one, for get_rate_limit_status.
     rest = new REST({ version: "10", rejectOnRateLimit: rejectsRateLimit, invalidRequestWarningInterval: 1 }).setToken(token);
     // Every verb goes through request(), so this one check covers them all.
     const send = rest.request.bind(rest);
     rest.request = (options) => {
       assertSafeRoute(options.fullRoute);
       assertRouteMatchesLinks(options.fullRoute);
-      return send(options);
+      // A request Discord answered is what makes a day count as real use
+      // in the usage stats (see usageStats.ts).
+      return send(options).then((answer) => {
+        noteDiscordReached();
+        return answer;
+      });
     };
     attachRateLimitObserver(rest);
     restByToken.set(token, rest);

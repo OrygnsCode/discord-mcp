@@ -1,10 +1,6 @@
 # discord-mcp Tool Catalog
 
-Version: 1.1
-Status: shipped; the contract the implementation follows
-Owner: Orygn LLC
-
-This document is the contract for the discord-mcp tool surface. Every tool the server exposes is listed here with its tier, destructiveness, required Discord permission, key parameters, and behavior. The implementation and the registry listings derive from this file. Change the contract here first, then change code.
+This document is the contract for the discord-mcp tool surface. Every tool the server exposes is listed here with its tier, destructiveness, required Discord permission, key parameters, and behavior.
 
 Totals: 164 tools implemented and shipped. All of them load by default. `DISCORD_MCP_TOOLS` narrows that to a chosen set of groups, with a core of 15 diagnostics and read tools always present; see [toolsets](toolsets.md) for the groups and what each one costs.
 
@@ -55,9 +51,11 @@ When more than one bot is configured, each guild-scoped tool is routed to the bo
 
 ### 1.3 Tiers
 
-Every tool a session exposes is registered at startup and appears in `tools/list`. Nothing is fetched later, and there is no discovery call: an earlier version of this document described on-demand loading that was never built.
+Every tool a session exposes is registered at startup and appears in `tools/list`. Nothing is fetched later, and there is no discovery call.
 
 What controls the surface is `DISCORD_MCP_TOOLS`, which selects groups. Unset loads all 164. See [toolsets](toolsets.md) for the groups, their membership, and what each one costs in context. The `core` group there is 15 diagnostics and read tools, always loaded because without them the server cannot report which servers it reaches or whether setup worked.
+
+`DISCORD_MCP_READ_ONLY=true` narrows whatever is selected to the tools annotated `readOnlyHint: true`: 60 of the 164 with every group loaded. The others are not registered, so the model is never offered them. `DISCORD_MCP_ALLOWED_SERVERS` does not change the surface; it limits where every tool may act (1.8).
 
 Neither marking is authorization. A tool being loaded does not mean the caller may use it (see 1.8).
 
@@ -72,7 +70,7 @@ When an app connects, the server sends a short text about itself: the `instructi
 - that a parameter a tool does not have is refused (1.7b), where that check is on;
 - `undo_change` and `run_setup_check`.
 
-The text is built from what the install runs. A group left out by `DISCORD_MCP_TOOLS` is not described and none of its tools is named, and the sentences about previews and refused parameters follow `DISCORD_MCP_SAFE_MODE` and `DISCORD_MCP_STRICT_PARAMS`. It stays under 2,000 characters, about 400 tokens in every session; Claude Code cuts instructions at 4,096.
+The text is built from what the install runs. A group left out by `DISCORD_MCP_TOOLS` is not described and none of its tools is named, and the sentences about previews and refused parameters follow `DISCORD_MCP_SAFE_MODE` and `DISCORD_MCP_STRICT_PARAMS`. In read-only mode the text says so instead, and tells the model to answer a request for a change by saying the install is read-only. It stays under 2,000 characters, about 400 tokens in every session; Claude Code cuts instructions at 4,096.
 
 ### 1.4 Destructive operations
 
@@ -166,7 +164,7 @@ A parameter that is not in a tool's schema is never dropped in silence. A call t
 
 - A tool that changes something refuses the call before doing anything, and lists the parameters it does have. `dry_run` gets a sentence of its own: some tools take it, and on the others a call marked as a rehearsal would otherwise run for real.
 - A tool that only reads (`readOnlyHint`) answers as usual and adds a warning naming what it ignored. `plan_server_build` is the exception: it changes nothing itself, but the plan it stages is what `execute_build_plan` runs, so it refuses.
-- The same holds inside a parameter. A key that a blueprint's channel, a file entry, an onboarding prompt, or any other nested object does not have is answered by its path, such as `blueprint.channels[2].private`. Before, a channel written that way was built for everyone to see.
+- The same holds inside a parameter. A key that a blueprint's channel, a file entry, an onboarding prompt, or any other nested object does not have is answered by its path, such as `blueprint.channels[2].private`.
 - An undeclared key counts whatever its value, `null` included: `null` is how this API clears a setting, so `private_to` misspelled and set to `null` is an instruction that would otherwise go missing. The one exception is `dry_run` set to `false` or `null` on a tool with no dry run, which asks for what that tool does anyway.
 - `sessionId`, `action`, `chatInput`, and `toolCallId` are accepted and ignored by every tool that does not declare them, because n8n's AI Agent adds them to each call.
 
@@ -174,8 +172,9 @@ A parameter that is not in a tool's schema is never dropped in silence. A call t
 
 ### 1.8 Authorization layers
 
-Two layers, evaluated in order:
+Two layers, evaluated in order, after the install's own limit:
 
+0. Allowed servers: with `DISCORD_MCP_ALLOWED_SERVERS` set, a guild outside the list is refused before any request, however the call names it (name, id, or message link), and `list_servers` and `get_bot_info` leave it out. Changes that would show in every guild are refused too: a global slash command, and the bot's own profile. Unset, every guild the bot is in is reachable.
 1. Discord permission: what the bot can physically do, per guild and channel. Listed in the Requires column below. "none" means any bot in the guild can do it.
 2. Gateway intents: privileged intents gate whole capability groups. Members intent gates member listing and search. Message Content intent gates reading and searching message bodies. Voice state is not a privileged intent and is always requested.
 
@@ -188,7 +187,7 @@ The server owns rate limit coordination so the model never sees a 429 it could h
 - 401, 403, and 429 responses are counted, because Discord blocks an address after 10,000 of them in ten minutes. The count is reported; nothing throttles on it.
 - `get_rate_limit_status` reports the waits and that count, across every configured bot.
 
-### 1.10 Known API gaps the catalog must be honest about
+### 1.10 Known Discord API limits
 
 - Pinning: since February 23, 2026 pinning requires the PIN_MESSAGES permission; MANAGE_MESSAGES alone is no longer sufficient. Preflight checks the new permission.
 - Voice audio: joining voice to play or capture audio is out of scope. It needs a separate UDP voice connection, Opus, and DAVE end-to-end encryption, required since March 1, 2026. The voice tools are administrative only.
@@ -201,10 +200,9 @@ so narrowing the surface with `DISCORD_MCP_TOOLS` can never leave a write
 enabled that was not asked for, and an agent can always orient itself before
 it acts. The list, the sizes, and every optional group are in
 [toolsets.md](toolsets.md), which is the only place they are written down.
-A second copy here would be a second thing to keep true.
 
-The surface is shaped around two flows, and those drove which tools exist and
-how they are named rather than which ones load:
+The surface is shaped around two flows, which drove which tools exist and
+how they are named:
 
 - Chat and operate a server. Orientation (`get_server_overview`,
   `list_channels`), name-to-entity resolution (`find`, so a model never hunts
@@ -297,7 +295,7 @@ that is a tool rather than a paragraph in a README.
 | get_message | no | Message Content intent | channel, guild, message_id, include_images, max_images, include_flagged | One message in full detail: author, content, timestamps, attachments, embed count and embed text, what a forwarded message forwards, reactions, and the reply reference. `flagged_media` lists attachments and embeds Discord's content scanning flagged (explicit, gore, self-harm), when any are. `include_images` also returns up to `max_images` (default 4, at most 10) of its pictures as image content the model can see: attachments, embed images and thumbnails, layout media, and a forwarded message's attachments. See 7.3. |
 | edit_message | no | own messages: none; webhook messages: Manage Webhooks | channel, guild, message_id, content, embeds[], components[] | Edits a bot-authored message, or one posted through one of the server's incoming webhooks (through the webhook's own token, inside threads too). Messages crossposted from a followed channel, or posted by another app's webhook, are refused with that reason. A message keeps the mode it was sent in: edit a Components V2 message with `components`, an ordinary one with `content` or `embeds` (7.4; an empty list takes the embeds off). Discord allows no conversion either way, so both mismatches are reported before the call rather than as a bare 400. An edit mentions nobody: Discord works out an edited message's mentions afresh, and would otherwise use its defaults. |
 | delete_message | yes | Manage Messages (others') | channel, message_id, reason | Deletes one message. |
-| bulk_delete_messages | yes | Manage Messages | channel, guild, count, from_author, contains | Bulk delete up to 100 messages under 14 days old, newest first, optionally narrowed by author or substring. Explicit message IDs are not accepted. The preview gives the count and a sample of five; the token covers exactly the messages counted. |
+| bulk_delete_messages | yes | Manage Messages | channel, guild, count, from_author, contains | Bulk delete up to 100 messages under 14 days old, newest first, optionally narrowed by author or substring. Explicit message IDs are not accepted. The preview gives the count and a sample of five. The token is bound to the request and keeps the previewed messages: confirming deletes those still there and still matching, and leaves alone, with a count of each, messages posted since the preview, ones already deleted, and ones edited out of the filter. A busy channel therefore never invalidates the token; a fresh preview picks up newer messages. |
 | search_messages | no | Read Message History; Message Content intent | query, channel, author, has (image, video, sound, file, sticker, embed, link, poll, snapshot), pinned, sort (recent, relevant), limit, offset | Full-text search over Discord's server message index. Matches whole words across every channel the bot can read, or one named channel, and looks inside embeds and polls, not just message text. Reports the total match count. |
 | pin_message | no | Pin Messages | channel, message_id | Pins. Preflights the post-Feb-2026 PIN_MESSAGES permission. |
 | unpin_message | no | Pin Messages | channel, message_id | Unpins. |
@@ -512,7 +510,7 @@ A picture given as a link is fetched by Discord, not by this server.
 
 ## 18. Builder (13 tools)
 
-The product headline. The flow is: brief in, plan out, plan reviewed, plan executed, with blueprints as the persistence format.
+The flow is: brief in, plan out, plan reviewed, plan executed, with blueprints as the persistence format.
 
 A blueprint is a JSON document with five optional fields: `name`, `theme`, `roles`, `categories`, and `channels` (top-level ones, outside any category). Roles carry a name, a permission preset plus any extra permission names, and color, hoist, and mentionable, and are listed highest first: that order is the hierarchy. There is no position field because one is not needed. Discord parks every role created through the API at position 1 and ranks roles that share a position by id, older higher, so a build that creates the top role first reproduces the hierarchy exactly, and an export lists roles the same way. Channels carry a name, type (text, voice, forum, stage, announcement), topic, slowmode, nsfw, and the visibility sugar below. Blueprints are portable across guilds because they reference roles by name rather than by ID. Any item may also carry its Discord `id`, which exports include: an item with an id means that exact role, category, or channel, so a new name renames it. An id the target server does not have falls back to matching by name, so an export still works as a design for another server.
 
@@ -520,7 +518,7 @@ Limits match Discord's own: 250 roles, 500 channels, 50 categories, and 50 chann
 
 What a blueprint does not carry: numeric role positions (order stands in for them, as above), AutoMod rules, onboarding, the welcome screen, scheduled events, and seed content such as a rules post or pinned message. Those are managed by their own tools, not by the builder.
 
-Division of labor, fixed at implementation time: the AI client owns the creative translation from conversation to blueprint (themes, naming, which channels a "dark fantasy guild" needs), guided by the reference layouts. discord-mcp owns correctness: schema validation, intra-blueprint and live-server collision detection, Discord structural limits, role reference resolution, Community feature gating (verified against the live API: forums work everywhere, announcement and stage channels need Community), bot permission preflight, and dependency ordering. This keeps every deployment free of any LLM dependency inside the server itself. Channels and categories can also carry `permissions`: per-role extras beyond who can see and post, such as letting a staff role mention everyone or manage messages in one channel, with `@everyone` allowed as a role. A listed role's extras become exactly the list; roles not listed keep theirs. Extras never touch the bits the visibility sugar controls, and one that contradicts it (denying a `private_to` role the view, say) is refused while planning. Exports write each role's extras out, so an export rebuilt on another server reproduces role permission overwrites exactly; only member-specific overwrites and those for roles an integration manages are still captured approximately.
+Division of labor: the AI client owns the creative translation from conversation to blueprint (themes, naming, which channels a "dark fantasy guild" needs), guided by the reference layouts. discord-mcp owns correctness: schema validation, intra-blueprint and live-server collision detection, Discord structural limits, role reference resolution, Community feature gating (verified against the live API: forums work everywhere, announcement and stage channels need Community), bot permission preflight, and dependency ordering. This keeps every deployment free of any LLM dependency inside the server itself. Channels and categories can also carry `permissions`: per-role extras beyond who can see and post, such as letting a staff role mention everyone or manage messages in one channel, with `@everyone` allowed as a role. A listed role's extras become exactly the list; roles not listed keep theirs. Extras never touch the bits the visibility sugar controls, and one that contradicts it (denying a `private_to` role the view, say) is refused while planning. Exports write each role's extras out, so an export rebuilt on another server reproduces role permission overwrites exactly; only member-specific overwrites and those for roles an integration manages are still captured approximately.
 
 Visibility sugar on channels and categories: private_to (role names that can see it; `[]` leaves only admins, `null` makes it visible to everyone, and leaving it out follows the category), read_only, and posting_roles (who may still post and start threads in a read-only channel). They become permission overwrites by changing only the bits they are about: a new channel starts from its category's overwrites, the way Discord does itself, and an edit starts from the channel's own, so member overwrites and other bits pass through untouched.
 
@@ -531,7 +529,7 @@ Every change to a server's structure made through discord-mcp keeps a record in 
 | Tool | D | Requires | Key parameters | Summary |
 |---|---|---|---|---|
 | plan_server_build | no | none | guild, blueprint (structured; the client AI composes it from the user's request, optionally starting from a reference layout or an export), update_existing, remove (roles, categories, channels) | Validates the blueprint against the live server and stages an ordered build plan. Makes no changes on Discord. Reports every problem at once (collisions, limits, bad role references, feature gates, missing bot permissions, role hierarchy, conversions Discord does not allow, renames onto a name in use). Existing items with matching names or ids are reused, never duplicated; with `update_existing` they are also changed to match, each change shown before and after, with risks flagged and settings left out reported as kept. Items in `remove` are deleted, each with what it loses. Plans are saved for 30 minutes, so another copy of the server can execute them. |
-| execute_build_plan | yes | aggregate of the plan's needs, typically Manage Channels + Manage Roles | guild, plan_id or blueprint | Executes a plan. The plan from plan_server_build is its preview, so there is no confirm_token. The blueprint is re-validated against live server state at execution time, so staged plans can never act on stale data. A plan that changes existing items runs once and only if those items are as the plan saw them; otherwise nothing runs. Where the app can show a confirmation dialog (1.4), such a plan runs only after the user ticks the box in a dialog listing its steps and risks; a declined dialog leaves the plan usable. A plan whose new channels or categories give @everyone or a role already on the server a power (1.4b) is treated the same way, since those people get the power the moment the channel exists. Other plans that only create run without a dialog. A blueprint passed directly only adds, and is refused when it would hand out such a power: it has had no preview at all. The bot always grants itself access to what it restricts. Runs in dependency order (roles highest first, then categories, then channels, creating before changing, deleting last), sends each channel's setting changes as one request, and halts on failure with a created/changed/failed/not-attempted report; planning again finishes the rest. Afterwards it plans the same blueprint against the server again and reports, under `check`, anything that did not take effect and anything the build did not touch that changed while it ran. New roles are then given distinct positions in one bulk call when the bot's own role sits high enough for Discord to allow it; when it does not, which is the case on a fresh server, they share a position and the client still ranks them in blueprint order. `role_positions` in the result says which happened. Reconcile mode (destructive, drift-correcting) is deferred to the diff_blueprint work. |
+| execute_build_plan | yes | aggregate of the plan's needs, typically Manage Channels + Manage Roles | guild, plan_id or blueprint | Executes a plan. The plan from plan_server_build is its preview, so there is no confirm_token. The blueprint is re-validated against live server state at execution time, so staged plans can never act on stale data. A plan that changes existing items runs once and only if those items are as the plan saw them; otherwise nothing runs. Where the app can show a confirmation dialog (1.4), such a plan runs only after the user ticks the box in a dialog listing its steps and risks; a declined dialog leaves the plan usable. A plan whose new channels or categories give @everyone or a role already on the server a power (1.4b) is treated the same way, since those people get the power the moment the channel exists. Other plans that only create run without a dialog. A blueprint passed directly only adds, and is refused when it would hand out such a power: it has had no preview at all. The bot always grants itself access to what it restricts. Runs in dependency order (roles highest first, then categories, then channels, creating before changing, deleting last), sends each channel's setting changes as one request, and halts on failure with a created/changed/failed/not-attempted report; planning again finishes the rest. Afterwards it plans the same blueprint against the server again and reports, under `check`, anything that did not take effect and anything the build did not touch that changed while it ran. New roles are then given distinct positions in one bulk call when the bot's own role sits high enough for Discord to allow it; when it does not, which is the case on a fresh server, they share a position and the client still ranks them in blueprint order. `role_positions` in the result says which happened. |
 | list_reference_layouts | no | none | (none) | The three server archetypes shipped with discord-mcp: `gaming-community`, `product-support`, and `friends-hangout`. Each is a vetted blueprint with a stated audience and rationale. |
 | get_reference_layout | no | none | layout_id | One archetype in full, with commentary on why its structure works. |
 | export_server_blueprint | no | none | guild, save_as, include_ids | Snapshots a live guild into a blueprint, with each item's id, decompiling permission overwrites back into the visibility sugar where they fit and warning per channel where they do not. Roles sharing a name are exported with a numeric suffix, since the format keys everything by name; overwrites for integration-managed roles are reported rather than exported, because those roles are not recreatable. Roles come out highest first, with tied positions ordered the way the client shows them, so a rebuild reproduces the hierarchy. Seed content and anything outside the schema above are not captured. |
@@ -546,7 +544,7 @@ Every change to a server's structure made through discord-mcp keeps a record in 
 
 ## 19. Events and notifications (4 tools)
 
-Real-time gateway events surfaced through MCP. No notable competitor ships this.
+Real-time gateway events surfaced through MCP.
 
 | Tool | D | Requires | Key parameters | Summary |
 |---|---|---|---|---|
@@ -584,13 +582,9 @@ Role counts come from Discord's member count endpoint. Invites and AutoMod rules
 
 ## 21. Explicit non-goals
 
-- Voice audio (play, capture, transcribe). Planned v2 flagship; blocked on DAVE E2EE work.
+- Voice audio (play, capture, transcribe).
 - Acting as a user account in any form. Self-bot patterns violate Discord ToS and will never ship.
-- Guild creation from nothing (`create_server`). Deferred; requires the dedicated builder-bot model due to the under-10-guilds API restriction.
+- Creating a server from nothing (`create_server`).
 - Monetization endpoints (SKUs, entitlements), Activities, and the Social SDK surface.
 - Answering Discord interactions: component buttons with a `custom_id`, select menus, modals, and app command invocations. Registering an app command is supported; responding when someone runs it is not, and would mean an always-on listener with a three-second budget rather than a request-response tool. Only link buttons ship, per 7.1.
 - Training any model on message content obtained through the API (Developer Policy rule 21). Runtime inference only.
-
-## 22. Open questions
-
-1. Blueprint schema versioning: semver the format, or stay loose for now.

@@ -26,33 +26,31 @@ const token = process.env.DISCORD_TOKEN;
 const guildId = setting("GUILD");
 
 // The guard. A real community server must never receive this suite, and
-// the package root .env may well hold a production token. Only the known
-// disposable test servers are allowed, plus any listed explicitly in
-// DISCORD_MCP_ACCEPTANCE_GUILDS by someone running their own.
-const DISPOSABLE_GUILDS = new Set([
-  "1514153264613167187", // OmniCord Dev
-  "1526520926446026824", // Omnicord Dev 2
-  ...(process.env.DISCORD_MCP_ACCEPTANCE_GUILDS ?? "")
+// the package root .env may well hold a production token. Only servers
+// listed in DISCORD_MCP_ACCEPTANCE_GUILDS are allowed.
+const DISPOSABLE_GUILDS = new Set(
+  (process.env.DISCORD_MCP_ACCEPTANCE_GUILDS ?? "")
     .split(",")
     .map((id) => id.trim())
-    .filter(Boolean),
-]);
+    .filter(Boolean)
+);
 if (!token || !guildId || !DISPOSABLE_GUILDS.has(guildId)) {
   console.error(
-    `Refusing to run: the configured server (${guildId ?? "none"}) is not a known disposable ` +
-      "test server. Point DISCORD_MCP_HOME at a folder whose .env has a test bot's " +
-      "DISCORD_TOKEN and DISCORD_MCP_GUILD, or list your own test server's id in " +
+    `Refusing to run: the configured server (${guildId ?? "none"}) is not listed in ` +
+      "DISCORD_MCP_ACCEPTANCE_GUILDS. Point DISCORD_MCP_HOME at a folder whose .env has a test " +
+      "bot's DISCORD_TOKEN and DISCORD_MCP_GUILD, and list that disposable test server's id in " +
       "DISCORD_MCP_ACCEPTANCE_GUILDS."
   );
   process.exit(1);
 }
 process.env.DISCORD_MCP_GUILD = guildId;
+// Test runs are not use: no usage stats from any server this starts.
+process.env.DISCORD_MCP_TELEMETRY = "off";
 
 // Someone outside the test server, banned and unbanned to test lifting a
-// ban: on OmniCord Dev, our second test bot, which is only in Omnicord Dev
-// 2. Elsewhere set DISCORD_MCP_ACCEPTANCE_BAN_USER, or that part is skipped.
-const OTHER_TEST_BOT =
-  process.env.DISCORD_MCP_ACCEPTANCE_BAN_USER ?? (guildId === "1514153264613167187" ? "1526521112698163250" : undefined);
+// ban, from DISCORD_MCP_ACCEPTANCE_BAN_USER (a user id). Without it that part
+// is skipped.
+const OTHER_TEST_BOT = process.env.DISCORD_MCP_ACCEPTANCE_BAN_USER || undefined;
 
 // Test assets are generated from raw bytes and served over loopback so
 // the sticker and soundboard tools fetch real URLs without depending on
@@ -255,6 +253,15 @@ try {
   notify("notifications/initialized", {});
 
   const info = await callTool("get_bot_info");
+  // The bot itself stands in as the member for member tools, by its id: its
+  // username may well match another member's name too. The username is used
+  // only where it is searched for.
+  const BOT_NAME = info.data?.bot?.username;
+  const BOT_ID = info.data?.bot?.id;
+  if (!BOT_NAME || !BOT_ID) {
+    console.error("get_bot_info returned no username or id; cannot run the member checks.");
+    process.exit(1);
+  }
   const guilds = info.data?.guilds?.list ?? [];
   if (guilds.length > 0) {
     console.log("  guilds:");
@@ -268,7 +275,7 @@ try {
     if (c.fix) console.log(`      fix: ${c.fix}`);
   }
 
-  // Phase 1 read tools, all against the default guild from .env.
+  // Read tools, all against the default guild from .env.
   await callTool("get_server_overview");
   await callTool("list_channels");
   await callTool("list_roles");
@@ -279,12 +286,12 @@ try {
     console.error("  find returned neither match nor candidates");
   }
 
-  await callTool("search_members", { query: "Omnicord" });
-  await callTool("get_member", { user: "Omnicord" });
+  await callTool("search_members", { query: BOT_NAME });
+  await callTool("get_member", { user: BOT_ID });
   await callTool("read_messages", { channel: "general" });
-  await callTool("search_messages", { channel: "general", query: "omnicord" });
+  await callTool("search_messages", { channel: "general", query: "omnitest" });
 
-  // Phase 2: writes, the confirmation gate, and cleanup. The flow leaves
+  // Writes, the confirmation gate, and cleanup. The flow leaves
   // the server exactly as it found it.
 
   function expect(condition, label) {
@@ -351,14 +358,14 @@ try {
   // Native search hits Discord's index, which lags a moment behind a just-sent
   // message, so assert the result shape and the filter paths rather than that
   // this exact message is already searchable.
-  const searchShape = await callTool("search_messages", { query: "omnicord" });
+  const searchShape = await callTool("search_messages", { query: "omnitest" });
   expect(
     typeof searchShape.data?.total_results === "number" &&
       Array.isArray(searchShape.data?.matches),
     "search returns the native index result shape"
   );
 
-  const searchByAuthor = await callTool("search_messages", { author: "Omnicord" });
+  const searchByAuthor = await callTool("search_messages", { author: BOT_ID });
   expect(
     typeof searchByAuthor.data?.total_results === "number",
     "search accepts an author filter"
@@ -427,13 +434,13 @@ try {
   );
 
   const assigned = await callTool("assign_role", {
-    member: "Omnicord",
+    member: BOT_ID,
     role: "omnitest-role",
   });
   expect(assigned.data?.role?.name === "omnitest-role", "role assigned to the bot");
 
   const again = await callTool("assign_role", {
-    member: "Omnicord",
+    member: BOT_ID,
     role: "omnitest-role",
   });
   expect(again.data?.already_assigned === true, "double assignment is a no-op");
@@ -491,7 +498,7 @@ try {
     "both acceptance messages are gone"
   );
 
-  // Phase 3a: builder staging. Everything here must change nothing.
+  // Builder staging. Everything here must change nothing.
 
   const layouts = await callTool("list_reference_layouts");
   expect((layouts.data?.layouts ?? []).length === 3, "three reference layouts ship");
@@ -550,13 +557,12 @@ try {
     "all blueprint problems reported at once"
   );
 
-  // Raw REST access for verification and cleanup; delete tools arrive in
-  // a later phase.
+  // Raw REST access for verification and cleanup.
   // The token and server the guard at the top checked.
   const auth = { Authorization: `Bot ${token}` };
   systemChannelAtStart = (await (await fetch(`https://discord.com/api/v10/guilds/${guildId}`, { headers: auth })).json()).system_channel_id ?? null;
 
-  // Phase 3b: execute a real build, verify the overwrites Discord stored,
+  // Execute a real build, verify the overwrites Discord stored,
   // prove idempotent re-runs, then remove everything.
 
   const execBlueprint = {
@@ -677,8 +683,8 @@ try {
   const execRoleDel = await deleteViaTool("delete_role", "role", roleStep?.id);
   expect(execRoleDel.data?.deleted === true, "gated delete removed the exec role");
 
-  // Live probe: the planner allows forums on non-community servers based
-  // on a June 2026 probe of the real API. This keeps checking that, so a
+  // Live probe: the planner allows forums on non-community servers because
+  // the real API does. This keeps checking that, so a
   // Discord policy change shows up here instead of in a user's build.
   const probe = await fetch(
     `https://discord.com/api/v10/guilds/${guildId}/channels`,
@@ -701,8 +707,7 @@ try {
       `forum probe failed (${probe.status}); planner gating needs retuning`
     );
   }
-  // Phase 4 batch 1: updates, edits, pins, then gated deletes finish the
-  // cleanup that raw REST used to do.
+  // Updates, edits, pins, then gated deletes that finish the cleanup.
   const chUpdate = await callTool("update_channel", {
     channel: "omnitest-temp",
     topic: "updated by the acceptance run",
@@ -747,10 +752,9 @@ try {
   const delRoleTool = await deleteViaTool("delete_role", "role", newRole.data.id);
   expect(delRoleTool.data?.deleted === true, "gated delete_role removed the test role");
 
-  // Phase 4 batch 2: moderation. With only the owner and the bot on the
-  // test server, the live tests target the protection paths (which must
-  // refuse with clear reasons) plus the two read tools. Actual kicks and
-  // bans get exercised when a second test account joins.
+  // Moderation: the live tests target the protection paths (which must
+  // refuse with clear reasons) plus the two read tools. Lifting a ban is
+  // tested further down when DISCORD_MCP_ACCEPTANCE_BAN_USER is set.
 
   const ownerInfo = await callTool("get_server_overview");
   const ownerId = ownerInfo.data?.owner_id;
@@ -768,7 +772,7 @@ try {
   );
 
   const timeoutSelf = await callToolRaw("timeout_member", {
-    member: "Omnicord",
+    member: BOT_ID,
     duration_minutes: 5,
   });
   expect(
@@ -776,7 +780,7 @@ try {
     "the bot refuses to time itself out"
   );
 
-  const untimeoutBot = await callTool("remove_timeout", { member: "Omnicord" });
+  const untimeoutBot = await callTool("remove_timeout", { member: BOT_ID });
   expect(untimeoutBot.data?.changed === false, "remove_timeout no-ops when not timed out");
 
   const bans = await callTool("list_bans");
@@ -1488,8 +1492,8 @@ try {
   expect(presenceIdle.data?.status === "idle", "presence sets to idle over the gateway");
   await callTool("set_bot_presence", { status: "online" });
 
-  // Community batch: enable the feature for real, run the tests that
-  // were previously only error paths, then put everything back.
+  // Community: enable the feature for real, run the tests that need it,
+  // then put everything back.
 
   await callTool("create_channel", { name: "omnitest-rules", topic: "Rules for the test." });
   await callTool("create_channel", { name: "omnitest-updates", topic: "Mod updates." });
@@ -1519,7 +1523,7 @@ try {
   expect(typeof announceChan.data?.id === "string", "announcement channel creates on a Community server");
 
   // Only an announcement thread can be started without a message in an
-  // announcement channel; the tool used to ask for a public one.
+  // announcement channel.
   const newsThread = await callTool("create_thread", { channel: "omnitest-announce", name: "omnitest-news-thread" });
   expect(typeof newsThread.data?.id === "string", "a thread starts in an announcement channel without a message");
   const newsPrivate = await callToolRaw("create_thread", { channel: "omnitest-announce", name: "omnitest-news-private", private: true });
@@ -1871,9 +1875,9 @@ try {
     expect(setup.data?.created === 5, "edit loop: setup builds five items");
     expect(setup.data?.check?.in_sync === true, "edit loop: the check after building finds everything in place");
 
-    // The leak fix, live: a read-only channel created in a private category.
-    await callTool("create_channel", { name: "omnitest-edit-leak", category: "omnitest-edit-cat", read_only: true });
-    const leak = await rawChannel("omnitest-edit-leak");
+    // A read-only channel created in a private category stays private.
+    await callTool("create_channel", { name: "omnitest-edit-inside", category: "omnitest-edit-cat", read_only: true });
+    const leak = await rawChannel("omnitest-edit-inside");
     const leakEveryone = ow(leak, guildId);
     expect(
       leakEveryone && (BigInt(leakEveryone.deny) & VIEW) !== 0n && (BigInt(leakEveryone.deny) & SEND) !== 0n,
@@ -1939,7 +1943,7 @@ try {
     expect(!ow(catNow, guildId) || (BigInt(ow(catNow, guildId).deny) & VIEW) === 0n, "edit loop: the category is open");
     const syncedNow = await rawChannel("omnitest-edit-synced");
     expect(!ow(syncedNow, guildId) || (BigInt(ow(syncedNow, guildId).deny) & VIEW) === 0n, "edit loop: the synced channel opened with its category");
-    const leakNow = await rawChannel("omnitest-edit-leak");
+    const leakNow = await rawChannel("omnitest-edit-inside");
     expect((BigInt(ow(leakNow, guildId)?.deny ?? 0) & VIEW) !== 0n, "edit loop: a channel with its own settings did not follow the category");
     const roNow = await rawChannel("omnitest-edit-ro");
     expect(!ow(roNow, roleId) || (BigInt(ow(roNow, roleId).allow) & SEND) === 0n, "edit loop: the posting role can no longer post");
@@ -2274,7 +2278,7 @@ try {
     }
   }
 
-  // The Desktop sequence: create, edit, delete, undo the delete, then undo
+  // Create, edit, delete, undo the delete, then undo
   // everything since the start in one go. The recreated channel has a new
   // id, and the older changes still name the old one.
   {
@@ -2784,22 +2788,21 @@ try {
     }
   }
 
-  // P1/P2 parity batches: messaging, members, permissions, structure,
-  // diagnostics. Community-gated tools (announcement, stage) and real DMs
-  // are exercised by hand, not here.
+  // Messaging, members, permissions, structure, diagnostics. Real DMs are
+  // not sent here.
 
   // Messaging: get, bulk delete, scheduler.
-  const m1 = await callTool("send_message", { channel: "general", content: "parity msg one" });
+  const m1 = await callTool("send_message", { channel: "general", content: "omnitest msg one" });
   const got = await callTool("get_message", { channel: "general", message_id: m1.data.id });
   expect(got.data?.message?.id === m1.data.id, "get_message returns the message");
 
-  const m2 = await callTool("send_message", { channel: "general", content: "parity delete me alpha" });
-  const m3 = await callTool("send_message", { channel: "general", content: "parity delete me beta" });
-  const bulkGate = await callTool("bulk_delete_messages", { channel: "general", contains: "parity delete me" });
+  const m2 = await callTool("send_message", { channel: "general", content: "omnitest delete me alpha" });
+  const m3 = await callTool("send_message", { channel: "general", content: "omnitest delete me beta" });
+  const bulkGate = await callTool("bulk_delete_messages", { channel: "general", contains: "omnitest delete me" });
   expect(bulkGate.data?.preview?.count === 2, "bulk delete previews the right count");
   const bulkDone = await callTool("bulk_delete_messages", {
     channel: "general",
-    contains: "parity delete me",
+    contains: "omnitest delete me",
     confirm_token: bulkGate.data?.confirm_token,
   });
   expect(bulkDone.data?.deleted === 2, "bulk delete removes the matched messages");
@@ -2807,7 +2810,7 @@ try {
   const soon = new Date(Date.now() + 4000).toISOString();
   const sched = await callTool("schedule_message", {
     channel: "general",
-    content: "parity scheduled fire",
+    content: "omnitest scheduled fire",
     send_at: soon,
   });
   expect(typeof sched.data?.id === "string", "message schedules");
@@ -2825,24 +2828,24 @@ try {
   );
   const firedFeed = await callTool("read_messages", { channel: "general", limit: 20 });
   const firedMsg = (firedFeed.data?.messages ?? []).find(
-    (m) => m.content === "parity scheduled fire"
+    (m) => m.content === "omnitest scheduled fire"
   );
   expect(Boolean(firedMsg), "scheduled message actually sent");
   const firedId = firedMsg?.id;
 
   // Members: nickname round trip, remove_role, permissions, voice (empty).
-  const nickSet = await callTool("update_member", { member: "Omnicord", nickname: "Parity Bot" });
-  expect((nickSet.data?.changed ?? []).some((c) => c.includes("Parity Bot")), "nickname sets");
-  await callTool("update_member", { member: "Omnicord", nickname: "" });
+  const nickSet = await callTool("update_member", { member: BOT_ID, nickname: "Test Nick" });
+  expect((nickSet.data?.changed ?? []).some((c) => c.includes("Test Nick")), "nickname sets");
+  await callTool("update_member", { member: BOT_ID, nickname: "" });
 
-  const tempRole = await callTool("create_role", { name: "omnitest-parity-role", preset: "member" });
-  await callTool("assign_role", { member: "Omnicord", role: "omnitest-parity-role" });
-  const removed = await callTool("remove_role", { member: "Omnicord", role: "omnitest-parity-role" });
-  expect(removed.data?.role?.name === "omnitest-parity-role", "remove_role takes the role back");
-  const roleHolders = await callTool("get_role_members", { role: "omnitest-parity-role" });
+  const tempRole = await callTool("create_role", { name: "omnitest-misc-role", preset: "member" });
+  await callTool("assign_role", { member: BOT_ID, role: "omnitest-misc-role" });
+  const removed = await callTool("remove_role", { member: BOT_ID, role: "omnitest-misc-role" });
+  expect(removed.data?.role?.name === "omnitest-misc-role", "remove_role takes the role back");
+  const roleHolders = await callTool("get_role_members", { role: "omnitest-misc-role" });
   expect((roleHolders.data?.members ?? []).length === 0, "get_role_members shows none after removal");
 
-  const memberPerms = await callTool("get_member_permissions", { member: "Omnicord" });
+  const memberPerms = await callTool("get_member_permissions", { member: BOT_ID });
   expect(memberPerms.data?.administrator === true, "bot reads as administrator server-wide");
   expect(memberPerms.data?.source === "discord", "get_member_permissions takes Discord's own answer");
 
@@ -2858,13 +2861,13 @@ try {
   expect(explainedNo.data?.source === "discord", "explain_permissions takes Discord's own answer in a channel");
 
   // Structure: channel/role detail, clone, reorder, permission overwrites.
-  const pchan = await callTool("create_channel", { name: "omnitest-parity-chan", topic: "parity" });
+  const pchan = await callTool("create_channel", { name: "omnitest-misc-chan", topic: "misc" });
   const chDetail = await callTool("get_channel", { channel: pchan.data.id });
-  expect(chDetail.data?.topic === "parity", "get_channel returns detail");
+  expect(chDetail.data?.topic === "misc", "get_channel returns detail");
 
   const setPerm = await callTool("set_channel_permissions", {
     channel: pchan.data.id,
-    target: "omnitest-parity-role",
+    target: "omnitest-misc-role",
     deny: ["view_channel"],
   });
   expect((setPerm.data?.deny ?? []).includes("view_channel"), "set_channel_permissions applies a deny");
@@ -2872,12 +2875,12 @@ try {
   expect((readPerm.data?.overwrites ?? []).length >= 1, "get_channel_permissions reads it back");
   // Clearing the role's denial lets its holders see the channel again, so
   // it waits for confirmation.
-  const clearPerm = await callTool("clear_channel_permissions", { channel: pchan.data.id, target: "omnitest-parity-role" });
+  const clearPerm = await callTool("clear_channel_permissions", { channel: pchan.data.id, target: "omnitest-misc-role" });
   expect(
-    clearPerm.data?.executed === false && clearPerm.summary.includes('Would let people with the role "omnitest-parity-role" see #omnitest-parity-chan.'),
+    clearPerm.data?.executed === false && clearPerm.summary.includes('Would let people with the role "omnitest-misc-role" see #omnitest-misc-chan.'),
     "grants: clearing a role's denial is previewed, since its holders could then see the channel"
   );
-  const clearedPerm = await callTool("clear_channel_permissions", { channel: pchan.data.id, target: "omnitest-parity-role", confirm_token: clearPerm.data?.confirm_token });
+  const clearedPerm = await callTool("clear_channel_permissions", { channel: pchan.data.id, target: "omnitest-misc-role", confirm_token: clearPerm.data?.confirm_token });
   expect(clearedPerm.data?.cleared === true, "clear_channel_permissions clears with the token");
 
   const locked = await callTool("lock_channel", { channel: pchan.data.id });
@@ -2885,16 +2888,16 @@ try {
   const unlocked = await callTool("unlock_channel", { channel: pchan.data.id });
   expect(unlocked.data?.locked === false, "unlock_channel unlocks");
 
-  const clonedChan = await callTool("clone_channel", { channel: pchan.data.id, new_name: "omnitest-parity-clone" });
+  const clonedChan = await callTool("clone_channel", { channel: pchan.data.id, new_name: "omnitest-misc-clone" });
   expect(typeof clonedChan.data?.id === "string", "clone_channel creates a copy");
-  const clonedRole = await callTool("clone_role", { role: "omnitest-parity-role", new_name: "omnitest-parity-role-2" });
+  const clonedRole = await callTool("clone_role", { role: "omnitest-misc-role", new_name: "omnitest-misc-role-2" });
   expect(typeof clonedRole.data?.id === "string", "clone_role creates a copy");
 
   await callTool("reorder_channels", { moves: [{ channel: pchan.data.id, position: 0 }] });
 
   const bulkRoleGate = await callTool("bulk_update_roles", {
     action: "assign",
-    role: "omnitest-parity-role",
+    role: "omnitest-misc-role",
     filter: { is_bot: true },
   });
   expect(typeof bulkRoleGate.data?.preview?.count === "number", "bulk_update_roles previews a count");
@@ -2911,7 +2914,7 @@ try {
   const roster = await callTool("list_members");
   expect((roster.data?.members ?? []).length >= 1, "list_members returns the roster");
 
-  // Cleanup for the parity section.
+  // Cleanup for this section.
   for (const id of [m1.data.id, firedId]) {
     const g = await callTool("delete_message", { channel: "general", message_id: id });
     if (g.data?.confirm_token) {
@@ -2922,7 +2925,7 @@ try {
     const g = await callTool("delete_channel", { channel });
     await callTool("delete_channel", { channel, confirm_token: g.data?.confirm_token });
   }
-  for (const role of ["omnitest-parity-role", "omnitest-parity-role-2"]) {
+  for (const role of ["omnitest-misc-role", "omnitest-misc-role-2"]) {
     const g = await callTool("delete_role", { role });
     await callTool("delete_role", { role, confirm_token: g.data?.confirm_token });
   }
@@ -3078,12 +3081,12 @@ try {
     }
   }
 
-  // Behaviour settled in the 2.0 audit, live: a lock that holds and an
+  // Live: a lock that holds and an
   // unlock that puts back only what the lock changed, scheduled messages
   // cancelled after a preview, invites revoked by their own server, builds
   // that give powers to people already here, counts that are counts, and
   // ids that are checked before any request.
-  console.log("\n--- audit ---");
+  console.log("\n--- behaviour ---");
   {
     const made = { channels: [], roles: [], invites: [] };
     const api = async (method, path, body) => {
@@ -3120,34 +3123,34 @@ try {
       made.channels.push(open.id);
       const locked = await callTool("lock_channel", { channel: open.id });
       let ow = await everyoneOn(open.id);
-      expect((BigInt(ow.allow) & SEND) === 0n && (BigInt(ow.deny) & (SEND | THREADS)) === (SEND | THREADS) && /had been allowed to post here/.test(locked.summary ?? ""), "audit: a lock takes off an allowance that would have kept the channel open, and denies threads too");
+      expect((BigInt(ow.allow) & SEND) === 0n && (BigInt(ow.deny) & (SEND | THREADS)) === (SEND | THREADS) && /had been allowed to post here/.test(locked.summary ?? ""), "behaviour: a lock takes off an allowance that would have kept the channel open, and denies threads too");
       const unlocked = await callTool("unlock_channel", { channel: open.id });
       ow = await everyoneOn(open.id);
-      expect(BigInt(ow.allow) === (VIEW | SEND) && BigInt(ow.deny) === 0n && unlocked.data?.locked === false, "audit: unlocking puts the channel back exactly as it was");
+      expect(BigInt(ow.allow) === (VIEW | SEND) && BigInt(ow.deny) === 0n && unlocked.data?.locked === false, "behaviour: unlocking puts the channel back exactly as it was");
       const readOnly = (await api("POST", `/guilds/${guildId}/channels`, { name: "omnitest-audit-readonly", type: 0, permission_overwrites: [{ id: guildId, type: 0, allow: "0", deny: String(SEND | THREADS) }] })).body;
       made.channels.push(readOnly.id);
       await callTool("lock_channel", { channel: readOnly.id });
       const stays = await callTool("unlock_channel", { channel: readOnly.id });
       ow = await everyoneOn(readOnly.id);
-      expect(BigInt(ow.deny) === (SEND | THREADS) && /stays closed/.test(stays.summary ?? ""), "audit: a channel that was read-only before a lock is still read-only after the unlock");
+      expect(BigInt(ow.deny) === (SEND | THREADS) && /stays closed/.test(stays.summary ?? ""), "behaviour: a channel that was read-only before a lock is still read-only after the unlock");
 
       // Scheduled messages.
       const queued = await callTool("schedule_message", { channel: open.id, content: "omnitest audit weekly", send_at: new Date(Date.now() - 60_000).toISOString(), repeat: "weekly" });
       const wait = new Date(queued.data?.send_at ?? 0).getTime() - Date.now();
-      expect(wait > 6.9 * 86_400_000 && wait < 7 * 86_400_000, "audit: a weekly message whose start has passed waits for its next time");
+      expect(wait > 6.9 * 86_400_000 && wait < 7 * 86_400_000, "behaviour: a weekly message whose start has passed waits for its next time");
       const cancelPreview = await callTool("cancel_scheduled_message", { schedule_id: queued.data?.id });
-      expect(cancelPreview.data?.executed === false && /which repeats weekly: "omnitest audit weekly"/.test(cancelPreview.summary ?? ""), "audit: cancelling a scheduled message previews what would be lost");
+      expect(cancelPreview.data?.executed === false && /which repeats weekly: "omnitest audit weekly"/.test(cancelPreview.summary ?? ""), "behaviour: cancelling a scheduled message previews what would be lost");
       const cancelled = await callTool("cancel_scheduled_message", { schedule_id: queued.data?.id, confirm_token: cancelPreview.data?.confirm_token });
-      expect(cancelled.data?.canceled === true, "audit: the token cancels it");
+      expect(cancelled.data?.canceled === true, "behaviour: the token cancels it");
 
       // Invites.
       const invite = await callTool("create_invite", { channel: open.id, max_age_seconds: 300, for_users: [me.id, "900000000000000001"] });
       if (invite.data?.code) made.invites.push(invite.data.code);
-      expect(invite.data?.for_users === 2 && /expires in 5 minutes/.test(invite.summary ?? ""), "audit: an invite for particular people passes its read-back, and says its lifetime in minutes");
+      expect(invite.data?.for_users === 2 && /expires in 5 minutes/.test(invite.summary ?? ""), "behaviour: an invite for particular people passes its read-back, and says its lifetime in minutes");
       const notACode = await callToolRaw("delete_invite", { code: `../channels/${open.id}` });
-      expect(notACode.isError && /is not an invite link or code/.test(notACode.summary ?? "") && (await api("GET", `/channels/${open.id}`)).status === 200, "audit: something that is not an invite code is refused, and nothing it pointed at is touched");
+      expect(notACode.isError && /is not an invite link or code/.test(notACode.summary ?? "") && (await api("GET", `/channels/${open.id}`)).status === 200, "behaviour: something that is not an invite code is refused, and nothing it pointed at is touched");
       const revokePreview = await callTool("delete_invite", { code: invite.data?.code });
-      expect(revokePreview.data?.executed === false && /to #omnitest-audit-open, made by /.test(revokePreview.summary ?? ""), "audit: revoking an invite previews its channel and who made it");
+      expect(revokePreview.data?.executed === false && /to #omnitest-audit-open, made by /.test(revokePreview.summary ?? ""), "behaviour: revoking an invite previews its channel and who made it");
       const revoked = await callTool("delete_invite", { code: invite.data?.code, confirm_token: revokePreview.data?.confirm_token });
       if (!revoked.isError) made.invites.pop();
 
@@ -3156,9 +3159,9 @@ try {
       const direct = await callToolRaw("execute_build_plan", { blueprint: powers });
       const builtAnyway = ((await api("GET", `/guilds/${guildId}/channels`)).body ?? []).find((c) => c.name === "omnitest-audit-powers");
       if (builtAnyway) made.channels.push(builtAnyway.id);
-      expect(direct.isError && /gives people already on the server powers/.test(direct.summary ?? "") && !builtAnyway, "audit: a blueprint that hands out a power is not built without a plan");
+      expect(direct.isError && /gives people already on the server powers/.test(direct.summary ?? "") && !builtAnyway, "behaviour: a blueprint that hands out a power is not built without a plan");
       const planned = await callTool("plan_server_build", { blueprint: powers });
-      expect(/It gives people already on the server powers in what it creates/.test(planned.summary ?? ""), "audit: the plan says why it must run as planned");
+      expect(/It gives people already on the server powers in what it creates/.test(planned.summary ?? ""), "behaviour: the plan says why it must run as planned");
 
       // Counts and names.
       const role = await callTool("create_role", { name: "omnitest-audit-counted" });
@@ -3166,27 +3169,27 @@ try {
       await api("PUT", `/guilds/${guildId}/members/${me.id}/roles/${role.data?.id}`);
       await new Promise((res) => setTimeout(res, 1500));
       const holders = await callTool("get_role_members", { role: role.data?.id });
-      expect(holders.data?.total === 1 && holders.data?.members?.[0]?.id === me.id, "audit: a role's holders are counted by Discord's own count");
+      expect(holders.data?.total === 1 && holders.data?.members?.[0]?.id === me.id, "behaviour: a role's holders are counted by Discord's own count");
       const everyone = await callTool("get_role_members", { role: "@everyone" });
-      expect((everyone.data?.members ?? []).length >= 1 && /Every member holds @everyone/.test(everyone.summary ?? ""), "audit: @everyone lists members instead of none");
+      expect((everyone.data?.members ?? []).length >= 1 && /Every member holds @everyone/.test(everyone.summary ?? ""), "behaviour: @everyone lists members instead of none");
       const mention = await callTool("get_member", { user: `<@${me.id}>` });
-      expect(mention.data?.id === me.id, "audit: a mention finds its member");
+      expect(mention.data?.id === me.id, "behaviour: a mention finds its member");
 
       // An edit mentions nobody.
       const sent = await callTool("send_message", { channel: open.id, content: "omnitest audit plain" });
       await callTool("edit_message", { channel: open.id, message_id: sent.data?.id, content: `<@${me.id}> edited in` });
       const after = (await api("GET", `/channels/${open.id}/messages/${sent.data?.id}`)).body;
-      expect((after?.content ?? "").includes(me.id) && (after?.mentions ?? []).length === 0, "audit: an edit changes the text without creating a mention");
+      expect((after?.content ?? "").includes(me.id) && (after?.mentions ?? []).length === 0, "behaviour: an edit changes the text without creating a mention");
 
       // Ids that are not ids never reach Discord.
       const badId = await callText("get_message", { channel: open.id, message_id: ".." });
-      expect(badId.isError && /17 to 20 digits/.test(badId.text), "audit: a message id that is not one is refused with what is expected");
+      expect(badId.isError && /17 to 20 digits/.test(badId.text), "behaviour: a message id that is not one is refused with what is expected");
       const badCode = await callText("delete_server_template", { code: ".." });
-      expect(badCode.isError && /letters, digits, and dashes/.test(badCode.text), "audit: so is a template code");
+      expect(badCode.isError && /letters, digits, and dashes/.test(badCode.text), "behaviour: so is a template code");
 
       // Live events belong to one server.
       const sub = await callTool("subscribe_events", { types: ["message_created"] });
-      expect(sub.data?.guild_id === guildId, "audit: a subscription records the server it was made for");
+      expect(sub.data?.guild_id === guildId, "behaviour: a subscription records the server it was made for");
       if (sub.data?.subscription_id) await callTool("unsubscribe_events", { subscription_id: sub.data.subscription_id });
     } finally {
       for (const code of made.invites) await api("DELETE", `/invites/${code}`).catch(() => {});

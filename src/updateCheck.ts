@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PACKAGE_NAME } from "./identity.js";
 import { setting } from "./settings.js";
+import { BUNDLE_SETTINGS, packagedAs } from "./packaging.js";
 
 // Telling people a newer version exists.
 //
@@ -130,13 +131,29 @@ export async function newerVersion(opts: UpdateCheckOptions): Promise<string | u
 
 export const UPDATE_COMMAND = `npx ${PACKAGE_NAME}@latest init`;
 export const RELEASES_URL = "https://github.com/OrygnsCode/discord-mcp/releases";
+export const BUNDLE_URL = `${RELEASES_URL}/latest/download/discord-mcp.mcpb`;
+
+// Whether this copy asks for a newer version at all: an installed copy does.
+// The Claude Desktop bundle runs outside node_modules but is an install like
+// any other, and it never updates itself, so it asks too. The Docker image
+// does not: its version is whatever image was deployed.
+export function checksForUpdates(env: Record<string, string | undefined> = process.env, installed: boolean): boolean {
+  return installed || packagedAs(env) === "mcpb";
+}
+
+// How this copy is updated. The Claude Desktop bundle does not update
+// itself and has no npx to run: the new bundle is opened over the old one.
+export function updateSteps(env: Record<string, string | undefined> = process.env): string {
+  return packagedAs(env) === "mcpb"
+    ? `downloads the new bundle (${BUNDLE_URL}) and opens it in Claude Desktop, or drags it onto ${BUNDLE_SETTINGS.replace(/ > Discord MCP$/, "")}`
+    : `runs \`${UPDATE_COMMAND}\`, chooses "Re-register with your AI client", and restarts the AI app`;
+}
 
 // One line, written as information for the AI to pass on, not as an order
-// to it: what is out, the one command, and where the changes are listed.
-export function updateNotice(latest: string, current: string): string {
+// to it: what is out, how to update, and where the changes are listed.
+export function updateNotice(latest: string, current: string, env: Record<string, string | undefined> = process.env): string {
   return (
-    `discord-mcp ${latest} is available; this is ${current}. To update, the person who set this up runs ` +
-    `\`${UPDATE_COMMAND}\`, chooses "Re-register with your AI client", and restarts the AI app. ` +
+    `discord-mcp ${latest} is available; this is ${current}. To update, the person who set this up ${updateSteps(env)}. ` +
     `What changed: ${RELEASES_URL}`
   );
 }

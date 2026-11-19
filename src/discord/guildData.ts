@@ -96,8 +96,7 @@ export async function getGuildList(
 ): Promise<RESTGetAPICurrentUserGuildsResult> {
   const cached = fresh(guildListCache.get(rest));
   if (cached) return cached;
-  // Discord lists 200 servers a page. Only the first page was read, so a
-  // bot in more servers than that could not be routed to the rest of them.
+  // Discord lists 200 servers a page, so every page is read.
   const value: RESTGetAPICurrentUserGuildsResult = [];
   let after: string | undefined;
   for (let page = 0; page < MAX_GUILD_PAGES; page += 1) {
@@ -133,7 +132,7 @@ export function invalidateGuildCaches(guildId: string): void {
 // of this server) arrive as gateway events, and clear the cache the same
 // way, so a cached list is as current as the gateway is. That matters
 // because Discord allows only 10 reads of a server's channel list a minute;
-// reading it fresh on every plan instead ran into that limit. A full
+// reading it fresh on every plan would run into that limit. A full
 // GUILD_CREATE, sent again after a reconnect, clears it too, since events
 // may have been missed in between.
 const STRUCTURE_EVENTS = new Set([

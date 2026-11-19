@@ -32,6 +32,7 @@ import { registerAppCommandTools } from "./tools/appCommands.js";
 import { registerBotProfileTools } from "./tools/botProfile.js";
 import { registerAuditTools } from "./tools/audit.js";
 import { registerCatchUpTools } from "./tools/catchUp.js";
+import { noteClient, noteToolCall } from "./usageStats.js";
 
 // Applies the toolset selection, the request scope the safety gate reads,
 // and the answer to a parameter a tool does not have, without touching the
@@ -65,6 +66,29 @@ function applyToolsets(server: McpServer, allowed: ReadonlySet<string>): McpServ
     (...a: unknown[]) =>
       runInRequest({ ctx: a[a.length - 1] as ServerContext, clientCapabilities }, () => callback(...a));
 
+  // Each call is counted for the usage stats under the tool's name, with
+  // the class of error when it failed (see usageStats.ts). Nothing from
+  // the arguments or the result is kept.
+  const clientName = (ctx: unknown): string | undefined => {
+    const envelope = (ctx as { mcpReq?: { envelope?: Record<string, unknown> } } | undefined)?.mcpReq?.envelope;
+    const fromEnvelope = (envelope?.["io.modelcontextprotocol/clientInfo"] as { name?: unknown } | undefined)?.name;
+    return typeof fromEnvelope === "string" ? fromEnvelope : server.server.getClientVersion()?.name;
+  };
+  const counted =
+    (name: string, callback: (...a: unknown[]) => unknown) =>
+    async (...a: unknown[]) => {
+      noteClient(clientName(a[a.length - 1]));
+      let result: unknown;
+      try {
+        result = await callback(...a);
+      } catch (err) {
+        noteToolCall(name, { summary: String(err), data: {} });
+        throw err;
+      }
+      noteToolCall(name, failureOf(result));
+      return result;
+    };
+
   return new Proxy(server, {
     get(target, prop) {
       if (prop === "registerTool") {
@@ -78,7 +102,7 @@ function applyToolsets(server: McpServer, allowed: ReadonlySet<string>): McpServ
             // (see unknownArguments.ts); the tool itself is untouched.
             const answering = last > 0 ? answeringUnknown(name, rest[0] as Parameters<typeof answeringUnknown>[1], run) : undefined;
             if (answering) rest[0] = answering.def;
-            rest[last] = answering ? answering.run : run;
+            rest[last] = counted(name, answering ? answering.run : run);
           }
           return (
             target.registerTool as unknown as (
@@ -96,44 +120,101 @@ function applyToolsets(server: McpServer, allowed: ReadonlySet<string>): McpServ
   });
 }
 
+// A failed tool result's summary and data, for sorting the failure into a
+// class. Undefined for anything that did not fail.
+function failureOf(result: unknown): { summary: string; data: unknown } | undefined {
+  const r = result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> } | undefined;
+  if (r?.isError !== true) return undefined;
+  const text = r.content?.[0]?.type === "text" ? (r.content[0].text ?? "") : "";
+  try {
+    const envelope = JSON.parse(text) as { summary?: unknown; data?: unknown };
+    return { summary: typeof envelope.summary === "string" ? envelope.summary : "", data: envelope.data };
+  } catch {
+    return { summary: text, data: undefined };
+  }
+}
+
+// Every tool module, in registration order.
+const REGISTRARS: ReadonlyArray<(server: McpServer, config: ServerConfig) => void> = [
+  registerDiagnostics,
+  registerReadTools,
+  registerWriteTools,
+  registerBuilderTools,
+  registerManageTools,
+  registerModerationTools,
+  registerReactionTools,
+  registerCommunityTools,
+  registerEventTools,
+  registerRealtimeTools,
+  registerThreadTools,
+  registerForumTools,
+  registerAutomodTools,
+  registerSettingsTools,
+  registerExpressionTools,
+  registerBlueprintTools,
+  registerChangeTools,
+  registerMessagingTools,
+  registerMemberTools,
+  registerPermissionTools,
+  registerStructureTools,
+  registerStageTools,
+  registerRosterTools,
+  registerAppCommandTools,
+  registerBotProfileTools,
+  registerAuditTools,
+  registerCatchUpTools,
+];
+
+// The tools that declare readOnlyHint: true, learned by letting every module
+// register into a recorder that keeps only the names and annotations.
+// Registering does nothing else (stateless HTTP builds a fresh server per
+// request on the same basis), and the annotations never depend on the
+// config, so this runs once per process. A tool without the annotation
+// counts as one that changes something.
+let readOnlyNames: ReadonlySet<string> | undefined;
+export function readOnlyToolNames(config: ServerConfig): ReadonlySet<string> {
+  if (readOnlyNames) return readOnlyNames;
+  const names = new Set<string>();
+  const recorder = {
+    registerTool(name: string, def?: { annotations?: { readOnlyHint?: boolean } }) {
+      if (def?.annotations?.readOnlyHint === true) names.add(name);
+      return undefined;
+    },
+  } as unknown as McpServer;
+  for (const register of REGISTRARS) register(recorder, config);
+  readOnlyNames = names;
+  return names;
+}
+
+// What this install offers: the selected tool groups, narrowed to the tools
+// that change nothing in read-only mode.
+export function effectiveTools(config: ServerConfig): ReadonlySet<string> {
+  if (!config.readOnly) return config.toolsets.tools;
+  const readOnly = readOnlyToolNames(config);
+  return new Set([...config.toolsets.tools].filter((name) => readOnly.has(name)));
+}
+
 // Builds a fully wired McpServer. A factory rather than a singleton because
 // stateless HTTP answers each request with a fresh instance, while stdio
 // pins one instance for the whole connection.
 export function buildServer(config: ServerConfig): McpServer {
+  const tools = effectiveTools(config);
   const real = new McpServer(
     { ...SERVER_INFO, version: VERSION },
-    { instructions: serverInstructions({ tools: config.toolsets.tools, safeMode: safeModeEnabled(), strictParams: strictParams() }) }
+    {
+      instructions: serverInstructions({
+        tools,
+        safeMode: safeModeEnabled(),
+        strictParams: strictParams(),
+        readOnly: config.readOnly === true,
+      }),
+    }
   );
-  // With no DISCORD_MCP_TOOLS set the selection holds every tool, so this is a
-  // pass-through and the registered surface is identical to before.
-  const server = applyToolsets(real, config.toolsets.tools);
-  registerDiagnostics(server, config);
-  registerReadTools(server, config);
-  registerWriteTools(server, config);
-  registerBuilderTools(server, config);
-  registerManageTools(server, config);
-  registerModerationTools(server, config);
-  registerReactionTools(server, config);
-  registerCommunityTools(server, config);
-  registerEventTools(server, config);
-  registerRealtimeTools(server, config);
-  registerThreadTools(server, config);
-  registerForumTools(server, config);
-  registerAutomodTools(server, config);
-  registerSettingsTools(server, config);
-  registerExpressionTools(server, config);
-  registerBlueprintTools(server, config);
-  registerChangeTools(server, config);
-  registerMessagingTools(server, config);
-  registerMemberTools(server, config);
-  registerPermissionTools(server, config);
-  registerStructureTools(server, config);
-  registerStageTools(server, config);
-  registerRosterTools(server, config);
-  registerAppCommandTools(server, config);
-  registerBotProfileTools(server, config);
-  registerAuditTools(server, config);
-  registerCatchUpTools(server, config);
+  // With no DISCORD_MCP_TOOLS set and read-only mode off the selection holds
+  // every tool, so this is a pass-through and the registered surface is
+  // identical to before.
+  const server = applyToolsets(real, tools);
+  for (const register of REGISTRARS) register(server, config);
   // Hand back the real server: the proxy exists only to gate registration.
   return real;
 }

@@ -62,6 +62,13 @@ if (config.toolsets.unknown.length > 0) {
   process.exit(1);
 }
 
+// The same for read-only mode and the allowed servers: a setting meant to
+// hold the server back is never quietly ignored.
+if (config.restrictionProblems && config.restrictionProblems.length > 0) {
+  for (const problem of config.restrictionProblems) console.error(`discord-mcp: ${problem}`);
+  process.exit(1);
+}
+
 const { http, port, host } = parseArgs(process.argv);
 
 // A client config naming a file inside npm's npx cache works until npm

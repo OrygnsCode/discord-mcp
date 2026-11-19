@@ -14,6 +14,7 @@ import { cancelSchedule, listSchedules } from "../scheduler.js";
 import { gateDestructive } from "../safety.js";
 import { quoted } from "../discord/names.js";
 import { ok, fail } from "../envelope.js";
+import { settingSource } from "../settings.js";
 import {
   botParam,
   botPermissions,
@@ -124,6 +125,13 @@ export function registerBotProfileTools(server: McpServer, config: ServerConfig)
       }
       if (!everywhere && username !== undefined) {
         return fail("username is the same in every server. Pass scope everywhere to change it, or nickname for one server.");
+      }
+      // The bot's own profile shows in every server it is in.
+      if (everywhere && config.allowedServers) {
+        return fail(
+          "The bot's own profile shows in every server it is in, and this install may act only in the servers in " +
+            `${settingSource("ALLOWED_SERVERS")}. Use scope server to change how it looks in one of them. Nothing was changed.`
+        );
       }
 
       const body: Record<string, unknown> = {};

@@ -1,5 +1,5 @@
 // The confirmation dialog end to end over stdio, as a 2025-era app that can
-// show a form (Claude Code and Claude Desktop today) runs it: the built
+// show a form (Claude Code, for one) runs it: the built
 // server, the SDK's server-side handling of the dialog, and delete_blueprint,
 // which touches only the local store, so no Discord token is needed.
 // smoke-modern.mjs covers the same flow on the 2026-07-28 protocol.
@@ -23,7 +23,7 @@ const check = (cond, label) => {
 async function session({ declare = true, answer }) {
   const child = spawn(process.execPath, [join(root, "dist", "index.js")], {
     cwd: home,
-    env: { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", DISCORD_MCP_HOME: home, DISCORD_MCP_DATA_DIR: home, ...extra },
+    env: { ...process.env, DISCORD_TOKEN: "", DISCORD_MCP_GUILD: "", DISCORD_MCP_TELEMETRY: "off", DISCORD_MCP_HOME: home, DISCORD_MCP_DATA_DIR: home, ...extra },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let buf = "";
