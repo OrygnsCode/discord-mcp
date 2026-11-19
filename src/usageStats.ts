@@ -27,7 +27,7 @@ export interface UsageSwitch {
 const ON_WORDS = ["on", "true", "1", "yes"];
 
 // Set by CI systems. A test run is never real use.
-const CI_VARIABLES = ["CI", "CONTINUOUS_INTEGRATION", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER", "CODEBUILD_BUILD_ID"];
+export const CI_VARIABLES = ["CI", "CONTINUOUS_INTEGRATION", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER", "CODEBUILD_BUILD_ID"];
 
 function truthy(value: string | undefined): boolean {
   if (value === undefined) return false;

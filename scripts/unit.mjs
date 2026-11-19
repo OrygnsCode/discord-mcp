@@ -11,6 +11,11 @@ process.env.DISCORD_TOKEN = "";
 // And nothing here sends usage stats; the tests for them turn them on
 // for themselves, against a receiver that is not real.
 process.env.DISCORD_MCP_TELEMETRY = "off";
+// Usage stats switch themselves off in CI. The tests that turn them on mean
+// it, so the CI variables are cleared and the suite runs the same in CI as
+// anywhere else. The CI rule has its own tests, which pass their own env.
+const CLEARED_CI = ["CI", "CONTINUOUS_INTEGRATION", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "TEAMCITY_VERSION", "BITBUCKET_BUILD_NUMBER", "CODEBUILD_BUILD_ID"];
+for (const name of CLEARED_CI) delete process.env[name];
 
 let failures = 0;
 
@@ -9529,6 +9534,8 @@ try {
   check(on({ DISCORD_MCP_TELEMETRY: "on", DO_NOT_TRACK: "1" }).on === false && on({ DO_NOT_TRACK: "1" }).why === "DO_NOT_TRACK is set", "usage: DO_NOT_TRACK wins");
   check(on({ DO_NOT_TRACK: "0" }).on === true && on({ DO_NOT_TRACK: "" }).on === true, "usage: DO_NOT_TRACK=0 or empty is not set");
   check(on({ DISCORD_MCP_TELEMETRY: "on", CI: "true" }).on === false && on({ GITHUB_ACTIONS: "true" }).why === "running in CI", "usage: CI never counts");
+  const { CI_VARIABLES } = await import("../dist/usageStats.js");
+  check(JSON.stringify(CI_VARIABLES) === JSON.stringify(CLEARED_CI), "usage: the suite clears exactly the CI variables the module reads");
   check(on({ CI: "false" }).on === true, "usage: CI=false is not CI");
   check(on({ OMNICORD_TELEMETRY: "off" }).on === false, "usage: the pre-2.0 name works too");
   const { usageSwitch: sw } = await import("../dist/usageStats.js");
