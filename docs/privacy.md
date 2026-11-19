@@ -92,8 +92,9 @@ unless you set `DISCORD_MCP_TELEMETRY=on`. A setup check
 
 Once a day, an npm install or the Claude Desktop bundle asks the npm registry
 for the latest version number of `@orygn/discord-mcp`. The request carries
-the package name and nothing about your servers. When a newer version is out,
-your AI hears about it once per session, and the setup check mentions it.
+the package name and the version you run (in its user agent), and nothing
+about your servers. When a newer version is out, your AI hears about it once
+per session, and the setup check mentions it.
 `DISCORD_MCP_UPDATE_CHECK=false` turns it off. A source checkout and the Docker
 image never ask.
 
