@@ -48,3 +48,8 @@ show("gate", totals.gate);
 show("errors", totals.error);
 show("setup runs", totals.setup);
 show("setup apps", totals.setup_app);
+show("setup stopped at (outcome|step)", totals.setup_step);
+show("setup errors (step|kind)", totals.setup_error);
+show("setup error codes (kind|code)", totals.setup_code, 30);
+show("setup trouble (outcome|what)", totals.setup_trouble, 40);
+show("setup Node.js (outcome|major)", totals.setup_node);

@@ -127,6 +127,54 @@ try {
   check((await count(today, "pings")) === before && (await count(today, "dev_pings")) === 1, "a report from a source checkout is counted apart, and nowhere else");
   await send("/discord-mcp/v1/setup", { s: 1, kind: "setup", day: today, nonce: hex(next++), v: "2.1.0", os: "macos", install: "npx", flow: "fresh", outcome: "completed", apps: ["claude-desktop", "evil"] });
   check((await count(today, "setup", "fresh|completed")) === 1 && (await count(today, "setup_app", "claude-desktop")) === 1 && (await count(today, "setup_app", "other")) === 1 && (await count(today, "setup_install", "npx")) === 1, "a setup run is counted by path, outcome and app");
+  // Where a run stopped, and why it failed: the step only for a run that did
+  // not complete, the kind of error only for one that failed.
+  const setupRun = (extra) => send("/discord-mcp/v1/setup", { s: 1, kind: "setup", day: today, nonce: hex(next++), v: "2.1.1", os: "windows", install: "npx", flow: "fresh", apps: [], ...extra });
+  await setupRun({ outcome: "failed", step: "token", error: "network" });
+  check((await count(today, "setup_step", "failed|token")) === 1 && (await count(today, "setup_error", "token|network")) === 1, "a failed run is counted by the step it stopped at and its kind of error");
+  await setupRun({ outcome: "cancelled", step: "invite", error: "network" });
+  check((await count(today, "setup_step", "cancelled|invite")) === 1 && (await count(today, "setup_error", "invite|network")) === 0, "a cancelled run counts its step, never an error");
+  await setupRun({ flow: "reregister", outcome: "completed", step: "register", error: "files" });
+  check((await count(today, "setup", "reregister|completed")) === 1 && (await count(today, "setup_step", "completed|register")) === 0 && (await count(today, "setup_error", "register|files")) === 0, "a completed run counts neither");
+  await setupRun({ outcome: "failed", step: "drop table", error: "EACCES C:\\Users\\someone" });
+  check((await count(today, "setup_step", "failed|other")) === 1 && (await count(today, "setup_error", "other|other")) === 1, "an unknown step or kind of error is counted as other");
+  const lastSetup = await db.prepare("SELECT body FROM log WHERE kind = 'setup' ORDER BY rowid DESC LIMIT 1").first();
+  check(!lastSetup.body.includes("Users") && !lastSetup.body.includes("drop"), `and the log keeps only the cleaned values (${lastSetup.body})`);
+  await setupRun({ outcome: "failed" });
+  check((await count(today, "setup", "fresh|failed")) === 3 && (await count(today, "setup_step", "failed|other")) === 1, "a failed run from before 2.1.1, with neither, still counts as a run");
+  const metricRows = async (metric) => (await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE metric = ?1").bind(metric).first()).c;
+  check((await metricRows("setup_node")) === 0 && (await metricRows("setup_trouble")) === 0 && (await metricRows("setup_code")) === 0, "and fields a report does not have add no counts");
+
+  // The error code: only for a failed run, from a fixed list.
+  await setupRun({ outcome: "failed", step: "token", error: "network", code: "ENOTFOUND" });
+  check((await count(today, "setup_code", "network|ENOTFOUND")) === 1, "a failed run's error code is counted with its kind");
+  await setupRun({ outcome: "failed", step: "save", error: "files", code: "EACCES: permission denied, open 'C:\\Users\\someone\\x.json'" });
+  await setupRun({ outcome: "failed", step: "save", error: "files", code: 13 });
+  check((await count(today, "setup_code", "files|other")) === 2, "a code not on the list, text or a number, is counted as other");
+  await setupRun({ outcome: "cancelled", step: "token", error: "network", code: "ENOTFOUND" });
+  await setupRun({ outcome: "failed", step: "token", code: "ENOTFOUND" });
+  check((await count(today, "setup_code", "network|ENOTFOUND")) === 1 && (await count(today, "setup_code", "-|ENOTFOUND")) === 0 && (await metricRows("setup_code")) === 2, "no code is counted for a run that did not fail, or one with no kind of error");
+
+  // What went wrong along the way: any outcome, each at most once.
+  await setupRun({ outcome: "completed", flow: "reregister", trouble: ["token_secret", "token_secret", "intents_off", "rm -rf /", 7, null] });
+  check((await count(today, "setup_trouble", "completed|token_secret")) === 1 && (await count(today, "setup_trouble", "completed|intents_off")) === 1 && (await count(today, "setup_trouble", "completed|other")) === 1, "trouble is counted for a completed run too, once each, with anything unknown as other");
+  await setupRun({ outcome: "cancelled", step: "token", trouble: "token_secret" });
+  await setupRun({ outcome: "cancelled", step: "token", trouble: { token_secret: true } });
+  check((await count(today, "setup_trouble", "cancelled|token_secret")) === 0, "trouble that is not a list is ignored");
+  const flood = await setupRun({ outcome: "cancelled", step: "token", trouble: Array.from({ length: 5000 }, (_, i) => `t${i}`) });
+  check(flood.status === 204 && (await count(today, "setup_trouble", "cancelled|other")) === 1, "a flood of trouble is cut short and counted once, as other");
+
+  // The major Node.js version.
+  await setupRun({ outcome: "completed", flow: "upgrade", node: "22" });
+  check((await count(today, "setup_node", "completed|22")) === 1, "the Node.js major version is counted with the outcome");
+  for (const node of ["999", "7", "22.11.0", "0", "", "abc", 22]) await setupRun({ outcome: "completed", flow: "upgrade", node });
+  check((await count(today, "setup_node", "completed|other")) === 7, "anything else is counted as other");
+
+  // Every row a setup report adds stays small, whatever it carries.
+  const countsBefore = await db.prepare("SELECT COALESCE(SUM(n), 0) AS n FROM daily").first();
+  await setupRun({ outcome: "failed", step: "token", error: "network", code: "ENOTFOUND", node: "24", apps: Array.from({ length: 50 }, () => "cursor"), trouble: [...Array.from({ length: 17 }, (_, i) => `x${i}`), "token_id"] });
+  const countsAfter = await db.prepare("SELECT COALESCE(SUM(n), 0) AS n FROM daily").first();
+  check(countsAfter.n - countsBefore.n <= 12, `one report adds at most a dozen counts (${countsAfter.n - countsBefore.n})`);
 
   // The private stats.
   const get = (path, headers = {}) => mf.dispatchFetch(`http://localhost${path}`, { headers });
@@ -182,6 +230,28 @@ try {
   check(outcome === "sent" && n === 1 && ((await sdb.prepare("SELECT n FROM daily WHERE day = ?1 AND metric = 'largest' AND key = '<50'").bind(today).first())?.n ?? 0) === 1, `the client's own report is taken and counted (${outcome})`);
   const setupSent = await client.sendSetupEvent({ flow: "add_bot", outcome: "cancelled", apps: [] });
   check(setupSent === true && ((await sdb.prepare("SELECT n FROM daily WHERE metric = 'setup' AND key = 'add_bot|cancelled'").first())?.n ?? 0) === 1, "and so is its setup event");
+  await client.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step: "token", error: "certificate" });
+  check(((await sdb.prepare("SELECT n FROM daily WHERE metric = 'setup_error' AND key = 'token|certificate'").first())?.n ?? 0) === 1, "and a failed one, with its step and kind of error");
+  // Every step and kind of error the client can send is one the receiver
+  // keeps, rather than counting it as other.
+  for (const step of client.SETUP_STEPS) await client.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step, error: "other" });
+  for (const error of client.SETUP_ERRORS) await client.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step: "save", error });
+  const kept = async (metric, key) => ((await sdb.prepare("SELECT n FROM daily WHERE metric = ?1 AND key = ?2").bind(metric, key).first())?.n ?? 0) > 0;
+  const lostSteps = [];
+  for (const step of client.SETUP_STEPS) if (!(await kept("setup_step", `failed|${step}`))) lostSteps.push(step);
+  const lostErrors = [];
+  for (const error of client.SETUP_ERRORS) if (!(await kept("setup_error", `save|${error}`))) lostErrors.push(error);
+  check(lostSteps.length === 0 && lostErrors.length === 0 && !(await kept("setup_step", "failed|other")), `the receiver knows every step and kind of error the client sends (not kept: ${[...lostSteps, ...lostErrors].join(", ") || "none"})`);
+  for (const code of client.SETUP_CODES) await client.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step: "token", error: "network", code });
+  const lostCodes = [];
+  for (const code of client.SETUP_CODES) if (!(await kept("setup_code", `network|${code}`))) lostCodes.push(code);
+  check(lostCodes.length === 0 && client.SETUP_CODES.length > 40, `and every error code (${client.SETUP_CODES.length}; not kept: ${lostCodes.join(", ") || "none"})`);
+  await client.sendSetupEvent({ flow: "upgrade", outcome: "completed", apps: [], trouble: [...client.SETUP_TROUBLE] });
+  const lostTrouble = [];
+  for (const t of client.SETUP_TROUBLE) if (!(await kept("setup_trouble", `completed|${t}`))) lostTrouble.push(t);
+  check(lostTrouble.length === 0 && !(await kept("setup_trouble", "completed|other")), `and every kind of trouble, all at once (not kept: ${lostTrouble.join(", ") || "none"})`);
+  const major = process.versions.node.split(".")[0];
+  check(await kept("setup_node", `completed|${major}`), `and the Node.js it runs on (${major})`);
   await served.dispose();
   rmSync(data, { recursive: true, force: true });
 } finally {

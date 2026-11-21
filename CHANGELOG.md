@@ -5,6 +5,29 @@ The format follows Keep a Changelog, and the project follows semantic
 versioning. Version 1.0.0 marked the public launch; releases since follow
 semver.
 
+## 2.1.1 (2026-11-20)
+
+### Fixed
+
+- The setup wizard no longer crashes when it can't reach Discord or save a
+  file. It says what went wrong and what to try, gives Discord a second try
+  first, and prints a line to paste into an issue, without your token or
+  user name in it.
+- It catches Ctrl+V typed as a key instead of pasting, which some terminals
+  do while typing is hidden, and says how to paste there.
+- It spots a Client Secret, Public Key, or ID pasted in place of the bot
+  token, and drops the spaces and invisible characters that come along when
+  a token is copied.
+- It warns when Node.js is older than 22.
+- The Claude Desktop docs say where on the Extensions page to drop the
+  bundle.
+
+### Changed
+
+- The setup wizard's usage report also says which major Node.js version it
+  ran on, what went wrong along the way, where a setup stopped, and what
+  kind of error stopped one that failed. [What's in it](https://github.com/OrygnsCode/discord-mcp/blob/main/docs/privacy.md)
+
 ## 2.1.0 (2026-11-19)
 
 ### Added

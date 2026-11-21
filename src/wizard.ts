@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { VERSION } from "./config.js";
-import { sendSetupEvent, type SetupEvent } from "./usageReport.js";
+import { sendSetupEvent, SETUP_CODES, type SetupEvent } from "./usageReport.js";
 import { usageSwitch } from "./usageStats.js";
 import {
   envFilePath,
@@ -43,7 +43,20 @@ import {
   uniqueBotName,
   serializeBotsFile,
   addBotToBotsFile,
+  cleanToken,
+  tokenShape,
+  DiscordUnreachable,
+  InputFailure,
+  failureKind,
+  failureCode,
+  failureDetails,
+  withoutHome,
+  errorCode,
+  nodeMajor,
+  MIN_NODE_MAJOR,
   type ConfigCandidate,
+  type SetupFailure,
+  type TokenShape,
   type WizardBot,
 } from "./wizardLib.js";
 
@@ -55,6 +68,10 @@ import {
 const PORTAL = "https://discord.com/developers/applications";
 // The setup walkthrough, at the point where it creates the bot in the portal.
 const WALKTHROUGH_PORTAL_STEPS = "https://youtu.be/vYAdzxzLKWY?t=32";
+const ISSUES = "https://github.com/OrygnsCode/discord-mcp/issues";
+
+// Every token entered this run, so no error printed on screen can show one.
+const secrets = new Set<string>();
 
 const packageRoot = dirname(
   createRequire(import.meta.url).resolve("../package.json")
@@ -77,6 +94,7 @@ const input: {
   ended: boolean;
   started: boolean;
   lastWasCR: boolean;
+  error: unknown;
 } = {
   buffer: "",
   lines: [],
@@ -84,6 +102,7 @@ const input: {
   ended: false,
   started: false,
   lastWasCR: false,
+  error: undefined,
 };
 
 function deliverLine(line: string | undefined): void {
@@ -132,7 +151,19 @@ function startInput(): void {
     input.ended = true;
     deliverLine(undefined);
   });
+  // Unheard, an error here would crash the process past every handler.
+  process.stdin.on("error", (err) => {
+    input.error = err;
+    input.ended = true;
+    deliverLine(undefined);
+  });
   process.stdin.resume();
+}
+
+// Input ended: by the person (Ctrl+C, end of a pipe), or by the terminal
+// failing.
+function inputEnded(): Error {
+  return input.error ? new InputFailure(input.error) : new Cancelled();
 }
 
 async function nextLine(): Promise<string | undefined> {
@@ -147,7 +178,7 @@ async function nextLine(): Promise<string | undefined> {
 async function ask(prompt: string): Promise<string> {
   process.stdout.write(prompt);
   const line = await nextLine();
-  if (line === undefined) throw new Cancelled();
+  if (line === undefined) throw inputEnded();
   const answer = line.trim();
   if (answer.toLowerCase() === "q") throw new Cancelled();
   return answer;
@@ -162,26 +193,56 @@ async function confirm(prompt: string, defaultYes: boolean): Promise<boolean> {
 
 // Token input with no echo: raw mode suppresses terminal echo while the
 // same character consumer keeps collecting the line. Piped input reads a
-// plain line, so the wizard stays scriptable.
+// plain line, so the wizard stays scriptable. Where the input cannot be
+// hidden, the prompt does not claim it is.
 async function askHidden(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY) return ask(prompt);
-  process.stdout.write(prompt);
+  if (!process.stdin.isTTY) {
+    note("input_visible");
+    return ask(`${prompt}: `);
+  }
   startInput();
-  process.stdin.setRawMode(true);
+  try {
+    process.stdin.setRawMode(true);
+  } catch {
+    note("input_visible");
+    return ask(`${prompt} ${dim("(this terminal cannot hide it)")}: `);
+  }
+  process.stdout.write(`${prompt} ${dim("(input is hidden)")}: `);
   try {
     const line = await nextLine();
     process.stdout.write("\n");
-    if (line === undefined) throw new Cancelled();
+    if (line === undefined) throw inputEnded();
+    if (line.trim().toLowerCase() === "q") throw new Cancelled();
     return line.trim();
   } finally {
-    process.stdin.setRawMode(false);
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      // The terminal is already gone.
+    }
   }
 }
 
+const DISCORD_TIMEOUT_MS = 15_000;
+
+// One GET to Discord's API. Any answer comes back as it is, whatever its
+// status. No answer at all (no connection, no reply in time, a certificate
+// refused) is tried once more after a short wait, and then stops the wizard
+// with DiscordUnreachable, which says what to check.
 async function discordGet(token: string, path: string): Promise<{ status: number; json: unknown }> {
-  const res = await fetch(`https://discord.com/api/v10${path}`, {
-    headers: { Authorization: `Bot ${token}` },
-  });
+  let res: Response | undefined;
+  for (let attempt = 1; !res; attempt += 1) {
+    try {
+      res = await fetch(`https://discord.com/api/v10${path}`, {
+        headers: { Authorization: `Bot ${token}` },
+        signal: AbortSignal.timeout(DISCORD_TIMEOUT_MS),
+      });
+      if (attempt > 1) note("network_retry");
+    } catch (err) {
+      if (attempt >= 2) throw new DiscordUnreachable(err);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
   let json: unknown;
   try {
     json = await res.json();
@@ -198,30 +259,164 @@ interface AppInfo {
   intents: IntentStatus;
 }
 
-async function fetchAppInfo(token: string): Promise<AppInfo | undefined> {
+// The bot behind a token, or the status Discord answered instead.
+async function fetchAppInfo(token: string): Promise<{ app?: AppInfo; status: number }> {
   const me = await discordGet(token, "/users/@me");
-  if (me.status !== 200) return undefined;
+  if (me.status !== 200) return { status: me.status };
   const app = await discordGet(token, "/applications/@me");
-  if (app.status !== 200) return undefined;
+  if (app.status !== 200) return { status: app.status };
   const user = me.json as { id: string; username: string };
   const application = app.json as { id: string; name: string; flags?: number };
   return {
-    id: application.id,
-    name: application.name,
-    botUsername: user.username,
-    intents: readIntents(application.flags ?? 0),
+    status: 200,
+    app: {
+      id: application.id,
+      name: application.name,
+      botUsername: user.username,
+      intents: readIntents(application.flags ?? 0),
+    },
   };
 }
 
-// What the setup event reports when the wizard ends (see usageReport.ts).
-const setup: SetupEvent = { flow: "fresh", outcome: "unfinished", apps: [] };
+// Where Ctrl+V does not paste, how to.
+const PASTE_KEY =
+  process.platform === "win32"
+    ? "Paste with a right-click instead."
+    : process.platform === "darwin"
+      ? "Paste with Cmd+V instead."
+      : "Paste with Ctrl+Shift+V or a right-click instead.";
 
+// Pastes that cannot be sent at all: what to say, and what the report notes.
+const UNSENDABLE: Partial<Record<TokenShape, { trouble: SetupTrouble; say: string[] }>> = {
+  ctrl_v: {
+    trouble: "token_ctrl_v",
+    say: [
+      "Ctrl+V came through as a key instead of pasting the token. Some terminals",
+      `do that while typing is hidden. ${PASTE_KEY}`,
+    ],
+  },
+  control: {
+    trouble: "token_control",
+    say: ["Keys like the arrows, Escape, or Ctrl came through with the token.", "Paste only the token, and press Enter."],
+  },
+  unusable: {
+    trouble: "token_unusable",
+    say: [
+      "That has characters a bot token never has, often picked up by copying it",
+      "through another app. Copy it straight from the Bot page and paste it again.",
+    ],
+  },
+};
+
+// What the setup report notes for a token Discord rejected, by its shape.
+// The first three never reach Discord.
+const REJECTED: Record<TokenShape, SetupTrouble> = {
+  ctrl_v: "token_ctrl_v",
+  control: "token_control",
+  unusable: "token_unusable",
+  ok: "token_rejected",
+  odd: "token_rejected",
+  id: "token_id",
+  public_key: "token_public_key",
+  secret: "token_secret",
+};
+
+// And for any other answer that was not ok.
+function answerTrouble(status: number): SetupTrouble {
+  if (status === 429) return "discord_429";
+  if (status === 403) return "discord_403";
+  return status >= 500 ? "discord_5xx" : "discord_other";
+}
+
+// Why a token Discord rejected was wrong, when its shape says.
+function rejectedTokenHint(shape: TokenShape): string[] {
+  const where = "The bot token is on the Bot page: Reset Token, then Copy.";
+  if (shape === "id") return ["That looks like an ID, not the bot token.", where];
+  if (shape === "public_key") return ["That looks like the Public Key, not the bot token.", where];
+  if (shape === "secret") return ["That looks like the Client Secret, not the bot token.", where];
+  return ["Discord did not accept that token. Reset it in the portal and try again."];
+}
+
+// What an answer other than ok or a rejected token means. Discord turns a
+// whole connection away for a while (429) after too many bad requests from
+// it, which on a shared connection can be other people's.
+function discordTrouble(status: number): string[] {
+  if (status === 429) {
+    return [
+      "Discord is turning away requests from your internet connection for now (HTTP 429).",
+      "It is temporary. Waiting a while, or another network, gets around it.",
+    ];
+  }
+  if (status === 403) {
+    return [
+      "Discord refused requests from your internet connection (HTTP 403).",
+      "A VPN or proxy can cause this. Try without it, or from another network.",
+    ];
+  }
+  return [`Discord answered with an error (HTTP ${status}). This is usually brief.`];
+}
+
+// What the setup event reports when the wizard ends (see usageReport.ts).
+const setup: SetupEvent = { flow: "fresh", outcome: "unfinished", apps: [], step: "start" };
+
+type SetupTrouble = NonNullable<SetupEvent["trouble"]>[number];
+
+// Notes something that went wrong along the way, once, for the report.
+function note(trouble: SetupTrouble): void {
+  const list = (setup.trouble ??= []);
+  if (!list.includes(trouble)) list.push(trouble);
+}
+
+// The setup report goes once, however the wizard ends.
+let reported = false;
+async function sendReportOnce(): Promise<void> {
+  if (reported) return;
+  reported = true;
+  await sendSetupEvent(setup).catch(() => false);
+}
+
+const CANCELLED = "\nSetup cancelled. Nothing was changed beyond any step already confirmed.";
+
+// Ctrl+C. At a question it quits the way q does. In the middle of a step it
+// reports and stops at once, without waiting for the step. Run through npx
+// on macOS and Linux the same press arrives twice, from the terminal and
+// passed on by npm, so a second one within a second is that same press; a
+// later one stops at once.
+let interruptedAt: number | undefined;
+function onInterrupt(): void {
+  const now = Date.now();
+  if (interruptedAt !== undefined) {
+    if (now - interruptedAt > 1000) process.exit(130);
+    return;
+  }
+  interruptedAt = now;
+  // Already ending, and reported: nothing was cancelled.
+  if (reported) process.exit(130);
+  if (input.waiter) {
+    input.ended = true;
+    deliverLine(undefined);
+    return;
+  }
+  setup.outcome = "cancelled";
+  console.log(yellow(CANCELLED));
+  void sendReportOnce().finally(() => process.exit(130));
+}
+
+// Ends with exit code 1 when setup failed, after saying why.
 export async function runWizard(): Promise<void> {
+  process.on("SIGINT", onInterrupt);
   console.log("");
   console.log(`  ${bold(cyan("Discord MCP"))} ${dim("by Orygn")}`);
   console.log(`  ${dim(rule())}`);
   console.log(`  ${dim(`Setup v${VERSION}. Type q at any prompt to quit; nothing is`)}`);
   console.log(`  ${dim("changed until it says so.")}\n`);
+
+  const node = nodeMajor();
+  if (node < MIN_NODE_MAJOR) {
+    console.log(yellow(`  This is Node.js ${process.versions.node}, and discord-mcp needs ${MIN_NODE_MAJOR} or newer.`));
+    console.log(yellow("  Setup can go on, but the server may not start until Node.js is updated:"));
+    console.log(`  ${underline("https://nodejs.org")}\n`);
+  }
 
   try {
     if (await offerUpgrade()) {
@@ -252,6 +447,7 @@ export async function runWizard(): Promise<void> {
       // which is the whole repair for a client pointing at a copy that no
       // longer exists, without redoing the setup.
       if (choice === "2") {
+        setup.step = "register";
         if (await registerClient()) printRestartSteps();
         return;
       }
@@ -266,17 +462,82 @@ export async function runWizard(): Promise<void> {
   } catch (err) {
     if (err instanceof Cancelled) {
       setup.outcome = "cancelled";
-      console.log(
-        yellow("\nSetup cancelled. Nothing was changed beyond any step already confirmed.")
-      );
+      console.log(yellow(CANCELLED));
       return;
     }
     setup.outcome = "failed";
-    throw err;
+    setup.error = failureKind(err, node);
+    setup.code = failureCode(err, SETUP_CODES);
+    explainFailure(err, setup.error);
+    process.exitCode = 1;
   } finally {
     process.stdin.pause();
-    await sendSetupEvent(setup).catch(() => false);
+    await sendReportOnce();
   }
+}
+
+// What stopped the wizard, in words, with what to try, and one line of
+// details to quote in an issue. Steps already shown as done stay done.
+function explainFailure(err: unknown, kind: SetupFailure): void {
+  const said: Record<SetupFailure, string[]> = {
+    network: [
+      "Setup could not reach Discord.",
+      "Check that discord.com opens in your browser. A VPN, proxy, firewall, or",
+      "antivirus can also keep Node.js from reaching it. Then run the setup again.",
+    ],
+    certificate: [
+      "Setup could not make a secure connection to Discord.",
+      "Something between this computer and Discord is getting in the way of it,",
+      "usually antivirus web scanning, a proxy, or a work or school network. Turn",
+      "off the antivirus's HTTPS scanning, or use another network, and run the",
+      "setup again.",
+    ],
+    files: fileTrouble(err),
+    terminal: [
+      "The terminal stopped sending input to the setup.",
+      process.platform === "win32"
+        ? "Run it again in Windows Terminal, PowerShell, or Command Prompt."
+        : "Run it again in a new terminal window.",
+    ],
+    old_node: [
+      "Setup hit an error, likely because this Node.js is too old.",
+      `This is Node.js ${process.versions.node}, and discord-mcp needs ${MIN_NODE_MAJOR} or newer.`,
+      `Install the LTS version from ${underline("https://nodejs.org")}, then run the setup again.`,
+    ],
+    other: [
+      "Setup hit an error it does not know how to explain, so this is likely a bug.",
+      "Running the setup again may get past it.",
+    ],
+  };
+  const [headline, ...advice] = said[kind];
+  console.log(`\n  ${red(bold(headline))}`);
+  for (const line of advice) console.log(`  ${line}`);
+  // What to paste into an issue: no token, and the home folder as ~.
+  const pasteable = (text: string) => withoutHome(text, homedir());
+  console.log(dim(`\n  Details: ${pasteable(failureDetails(err, secrets))}`));
+  if (kind === "other" && err instanceof Error && err.stack) {
+    const at = err.stack.split("\n").filter((l) => l.trim().startsWith("at ")).slice(0, 6);
+    for (const line of at) console.log(dim(`  ${pasteable(failureDetails(line.trim(), secrets))}`));
+  }
+  console.log(`\n  Still stuck? Open an issue and paste the details above (never your token):`);
+  console.log(`  ${underline(ISSUES)}\n`);
+}
+
+function fileTrouble(err: unknown): string[] {
+  const code = errorCode(err);
+  const path = (err as { path?: unknown } | null)?.path;
+  const file = typeof path === "string" ? path : "a file";
+  const quit = "Quit your AI app fully and run the setup again.";
+  if (code === "ENOSPC") return ["Setup could not save a file: the disk is full."];
+  if (code === "EBUSY") return [`Setup could not save ${file}: another program has it open.`, quit];
+  if (code === "EACCES" || code === "EPERM") {
+    return [
+      `Setup was not allowed to save ${file}.`,
+      "Another program may have it open, or antivirus may be blocking it.",
+      quit,
+    ];
+  }
+  return [`Setup could not save ${file} (${code}).`, "Check that you can write there, then run the setup again."];
 }
 
 // The AI clients whose config files the wizard knows how to find.
@@ -346,6 +607,7 @@ async function offerUpgrade(): Promise<boolean> {
 
   let allSwitched = true;
   if (legacyFiles.length > 0) {
+    setup.step = "register";
     const entryPath = durableEntryPath();
     if (!entryPath) return true;
     const entry = { command: "node", args: [entryPath] };
@@ -361,6 +623,7 @@ async function offerUpgrade(): Promise<boolean> {
       );
       console.log(dim(`  Run ${COMMAND} init again once it is switched over to move them.`));
     } else {
+      setup.step = "save";
       try {
         const move = moveLegacyHome(legacyHome(), defaultHome());
         console.log(`\n  ${green("Moved your settings")} to ${defaultHome()}`);
@@ -438,33 +701,59 @@ async function setupBot(opts: {
   console.log("  choose Guild Install only (uncheck User Install).");
   console.log(`  These steps on video: ${underline(WALKTHROUGH_PORTAL_STEPS)}\n`);
 
+  setup.step = "token";
   let token = "";
   let app: AppInfo | undefined;
+  let sameTokenAgain = false;
   while (!app) {
-    token = await askHidden(`  Paste the bot token ${dim("(input is hidden)")}: `);
-    if (!token) continue;
+    if (!sameTokenAgain) {
+      const pasted = await askHidden("  Paste the bot token");
+      token = cleanToken(pasted);
+      if (!token) continue;
+      if (token !== pasted) note("token_cleaned");
+      const unsendable = UNSENDABLE[tokenShape(token)];
+      if (unsendable) {
+        note(unsendable.trouble);
+        for (const line of unsendable.say) console.log(yellow(`  ${line}`));
+        continue;
+      }
+      secrets.add(token);
+    }
+    sameTokenAgain = false;
     process.stdout.write("  Checking with Discord... ");
-    app = await fetchAppInfo(token);
-    console.log(
-      app
-        ? `${green("ok.")} This is ${bold(app.botUsername)} (app: ${app.name}).`
-        : red("rejected.")
-    );
-    if (!app) {
-      console.log(
-        yellow("  Discord did not accept that token. Reset it in the portal and try again.")
-      );
+    const lookup = await fetchAppInfo(token);
+    app = lookup.app;
+    if (app) {
+      console.log(`${green("ok.")} This is ${bold(app.botUsername)} (app: ${app.name}).`);
+    } else if (lookup.status === 401) {
+      console.log(red("rejected."));
+      note(REJECTED[tokenShape(token)]);
+      for (const line of rejectedTokenHint(tokenShape(token))) console.log(yellow(`  ${line}`));
+    } else {
+      // Not a verdict on the token, so the same one is checked again.
+      console.log(red("could not check it."));
+      note(answerTrouble(lookup.status));
+      for (const line of discordTrouble(lookup.status)) console.log(yellow(`  ${line}`));
+      await ask(`  Press Enter to try again ${dim("(or q to quit)")}: `);
+      sameTokenAgain = true;
     }
   }
 
+  setup.step = "intents";
   console.log(`\n  ${bold("Privileged gateway intents")}`);
   for (;;) {
     const fresh = await fetchAppInfo(token);
-    if (!fresh) {
+    if (fresh.status === 401) {
       console.log(yellow("  Token stopped working; was it reset? Start the wizard again."));
       throw new Cancelled();
     }
-    app = fresh;
+    if (!fresh.app) {
+      note(answerTrouble(fresh.status));
+      for (const line of discordTrouble(fresh.status)) console.log(yellow(`  ${line}`));
+      await ask(`  Press Enter to try again ${dim("(or q to quit)")}: `);
+      continue;
+    }
+    app = fresh.app;
     const i = app.intents;
     console.log(
       `  Server Members: ${i.members ? green("on") : red(bold("OFF"))}   ` +
@@ -472,6 +761,7 @@ async function setupBot(opts: {
         `Presence: ${i.presence ? green("on") : yellow("off (optional)")}`
     );
     if (i.members && i.messageContent) break;
+    note("intents_off");
     console.log(
       yellow("  Missing intents break member search and message reading.") + " Open the"
     );
@@ -483,6 +773,7 @@ async function setupBot(opts: {
 
   let name = "";
   if (opts.askName) {
+    setup.step = "name";
     const suggested = suggestBotName(app.botUsername, opts.takenNames);
     const answer = await ask(
       `\n  Short name to tell this bot apart ${dim(`[${suggested}]`)}: `
@@ -491,6 +782,7 @@ async function setupBot(opts: {
     console.log(`  Named ${bold(name)}.`);
   }
 
+  setup.step = "invite";
   console.log(`\n  ${bold("Invite the bot to its server")}`);
   console.log("  How much should the bot be allowed to do?");
   INVITE_CHOICES.forEach((c, idx) =>
@@ -512,11 +804,20 @@ async function setupBot(opts: {
 
 // Single-bot only: choose a default server so tools can omit the guild.
 async function pickDefaultServer(token: string): Promise<string> {
+  setup.step = "server";
   const guilds = await discordGet(token, "/users/@me/guilds");
+  if (guilds.status !== 200) {
+    note("servers_unlisted");
+    console.log(
+      yellow(`  Could not list the bot's servers just now (HTTP ${guilds.status}); continuing without a default server.`)
+    );
+    return "";
+  }
   const guildList = Array.isArray(guilds.json)
     ? (guilds.json as Array<{ id: string; name: string }>)
     : [];
   if (guildList.length === 0) {
+    note("no_servers");
     console.log("  The bot is not in any server yet; continuing without a default server.");
     return "";
   }
@@ -547,6 +848,7 @@ function durableEntryPath(): string | undefined {
     console.log(dim(copy.copied ? "  Copied." : "  That version is already there; reusing it."));
     return copy.entry;
   } catch (err) {
+    note("npx_copy_failed");
     const reason = err instanceof Error ? err.message : String(err);
     console.log(red(`  Could not copy it out of the npx cache: ${reason}`));
     console.log("  Nothing was registered, because the cached copy would stop working");
@@ -575,6 +877,7 @@ async function writeClientEntry(
   try {
     state = clientConfigState(before);
   } catch {
+    note("config_invalid");
     console.log(yellow(`  ${target.path} is not valid JSON, so it was left untouched.`));
     console.log("  Add this to that file's mcpServers by hand:\n");
     printSnippet(entry);
@@ -617,6 +920,7 @@ async function writeClientEntry(
 // set up. Returns false when nothing could be registered; the reason is
 // already on screen by then.
 async function registerClient(): Promise<boolean> {
+  setup.step = "register";
   const entryPath = durableEntryPath();
   if (!entryPath) return false;
 
@@ -750,6 +1054,7 @@ async function runFreshSetup(cfg: ExistingConfig): Promise<void> {
     const bot = await setupBot({ heading: "Set up your bot", askName: false, takenNames: [] });
     console.log("");
     const defaultGuild = await pickDefaultServer(bot.token);
+    setup.step = "save";
     console.log(`\n${bold(cyan("Save configuration"))}`);
     writeEnvSingle(cfg, bot.token, defaultGuild);
     const registered = await registerClient();
@@ -774,6 +1079,7 @@ async function runFreshSetup(cfg: ExistingConfig): Promise<void> {
     });
     bots.push({ name: bot.name, token: bot.token, default: i === 0 });
   }
+  setup.step = "save";
   console.log(`\n${bold(cyan("Save configuration"))}`);
   writeBotsMulti(cfg, bots);
   const registered = await registerClient();
@@ -791,14 +1097,17 @@ async function runAddBot(cfg: ExistingConfig): Promise<void> {
   console.log("");
   const bot = await setupBot({ heading: "Add a bot", askName: true, takenNames: taken });
 
+  setup.step = "save";
   console.log(`\n${bold(cyan("Save configuration"))}`);
   mkdirSync(dirname(cfg.botsPath), { recursive: true });
   let content = existsSync(cfg.botsPath) ? readFileSync(cfg.botsPath, "utf8") : undefined;
 
   if (cfg.bots.length === 0 && cfg.envToken) {
     let existingName = "main";
-    const info = await fetchAppInfo(cfg.envToken);
-    if (info) existingName = suggestBotName(info.botUsername, [bot.name]);
+    secrets.add(cfg.envToken);
+    // Only for its name, so no answer just keeps "main".
+    const info = await fetchAppInfo(cfg.envToken).catch(() => ({ app: undefined }));
+    if (info.app) existingName = suggestBotName(info.app.botUsername, [bot.name]);
     content = addBotToBotsFile(content, { name: existingName, token: cfg.envToken });
     console.log(dim(`  Kept your existing bot as ${bold(existingName)} (default).`));
   }
@@ -807,6 +1116,7 @@ async function runAddBot(cfg: ExistingConfig): Promise<void> {
   writePrivateFile(cfg.botsPath, content);
   console.log(`  ${green("Bots saved")} to ${cfg.botsPath}`);
 
+  setup.outcome = "completed";
   console.log(`\n${bold(green("Bot added."))}`);
   const finalBots = parseBotsFile(content);
   console.log(`  ${finalBots.length} bots configured:`);

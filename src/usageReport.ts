@@ -450,18 +450,73 @@ export async function sendIfDue(now: Date = new Date()): Promise<"sent" | "skipp
 
 export const SETUP_FLOWS = ["fresh", "add_bot", "reregister", "upgrade"] as const;
 export const SETUP_OUTCOMES = ["completed", "unfinished", "cancelled", "failed"] as const;
+export const SETUP_STEPS = ["start", "token", "intents", "name", "invite", "server", "save", "register"] as const;
+export const SETUP_ERRORS = ["network", "certificate", "files", "terminal", "old_node", "other"] as const;
+
+// The error codes a failed run can report. Anything not here is sent as
+// "other", so a code can only ever be one of these words.
+export const SETUP_CODES = [
+  // No connection, or no answer.
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH",
+  "EHOSTUNREACH", "ENETDOWN", "ECONNABORTED", "EPIPE", "EPROTO", "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "timeout",
+  // A secure connection refused. ERR_SSL stands for every ERR_SSL_ code.
+  "SELF_SIGNED_CERT_IN_CHAIN", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "UNABLE_TO_GET_ISSUER_CERT", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID", "CERT_UNTRUSTED", "ERR_TLS_CERT_ALTNAME_INVALID", "ERR_SSL",
+  // Files, and the terminal.
+  "EACCES", "EPERM", "EBUSY", "ENOSPC", "EROFS", "ENOENT", "EEXIST", "ENOTDIR", "EISDIR",
+  "EMFILE", "ENFILE", "EIO", "ELOOP", "ENAMETOOLONG", "EXDEV", "EINVAL", "UNKNOWN",
+  "ENOTTY", "EBADF", "EAGAIN",
+  // An error with no code, by its type.
+  "TypeError", "RangeError", "ReferenceError", "SyntaxError",
+  "none", "other",
+] as const;
+
+// What went wrong along the way, whatever the outcome.
+export const SETUP_TROUBLE = [
+  "input_visible", // the token prompt could not hide what was typed
+  "token_cleaned", // spaces, quotes, or invisible characters taken out of a token
+  "token_ctrl_v", // Ctrl+V arrived as a key instead of pasting
+  "token_control", // other keys (arrows, Escape, Ctrl) arrived with the token
+  "token_unusable", // a token with other characters no token has
+  "token_secret", // rejected, and shaped like the Client Secret
+  "token_id", // rejected, and shaped like an ID
+  "token_public_key", // rejected, and shaped like the Public Key
+  "token_rejected", // rejected, any other shape
+  "discord_429", // Discord turned the connection away for a while
+  "discord_403", // Discord refused the connection
+  "discord_5xx", // Discord had an error of its own
+  "discord_other", // any other answer that was neither ok nor a rejection
+  "network_retry", // a request worked only on its second try
+  "intents_off", // a required intent was off when checked
+  "no_servers", // the bot was in no server yet
+  "servers_unlisted", // the bot's servers could not be listed
+  "npx_copy_failed", // the copy out of npx's cache failed
+  "config_invalid", // an app's config file was not valid JSON
+] as const;
 
 export interface SetupEvent {
   flow: (typeof SETUP_FLOWS)[number];
   outcome: (typeof SETUP_OUTCOMES)[number];
   // Where it registered the server: the wizard's own client ids, or snippet.
   apps: string[];
+  // The step it was on. Sent only for a run that did not complete.
+  step?: (typeof SETUP_STEPS)[number];
+  // The kind of error that stopped a failed run, and its code. Never the
+  // error's text, which can hold file paths, a user name, or the token.
+  error?: (typeof SETUP_ERRORS)[number];
+  code?: (typeof SETUP_CODES)[number];
+  trouble?: Array<(typeof SETUP_TROUBLE)[number]>;
 }
 
-// One report when the wizard ends: which path it took, how it ended, and
-// which app it set up. Waits at most the send timeout.
+// One report when the wizard ends: which path it took, how it ended, which
+// app it set up, what went wrong along the way, and for a run that did not
+// complete, where it stopped and why. Waits at most the send timeout.
 export async function sendSetupEvent(event: SetupEvent): Promise<boolean> {
   if (!usageSwitch(deps.env).on) return false;
+  const failed = event.outcome === "failed" && event.error !== undefined;
+  const trouble = [...new Set(event.trouble ?? [])].slice(0, SETUP_TROUBLE.length);
   const body = {
     s: SCHEMA,
     kind: "setup",
@@ -469,10 +524,14 @@ export async function sendSetupEvent(event: SetupEvent): Promise<boolean> {
     nonce: randomBytes(16).toString("hex"),
     v: VERSION,
     os: osName(),
+    node: process.versions.node.split(".")[0],
     install: installKind(deps.env),
     flow: event.flow,
     outcome: event.outcome,
     apps: [...new Set(event.apps)].slice(0, 5),
+    ...(trouble.length > 0 ? { trouble } : {}),
+    ...(event.outcome !== "completed" && event.step ? { step: event.step } : {}),
+    ...(failed ? { error: event.error, code: event.code ?? "none" } : {}),
   };
   return sendOutcome(await deps.post(endpoint(`${REPORT_PATH}/setup`), JSON.stringify(body))) === "sent";
 }

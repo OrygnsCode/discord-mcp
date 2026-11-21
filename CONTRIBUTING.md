@@ -99,6 +99,7 @@ scripts/
   smoke-modern.mjs    # Stdio session on the 2026-07-28 protocol. No token.
   smoke-dialog.mjs    # The confirmation dialog end to end. No token.
   smoke-http.mjs      # HTTP transport on both protocols, auth, security gates.
+  smoke-wizard.mjs    # The setup wizard, offline, with Discord down, busy, or refusing.
   acceptance.mjs      # Live end-to-end against a real Discord server.
   smoke-docker.mjs    # Builds and verifies the container image.
 docs/                 # Getting started, clients, self-hosting, security, tools
@@ -109,7 +110,7 @@ docs/                 # Getting started, clients, self-hosting, security, tools
 The same checks CI runs:
 
 ```bash
-npm test        # build + unit + smoke + smoke-modern + smoke-dialog + smoke-http
+npm test        # build + unit + smoke + smoke-modern + smoke-dialog + smoke-http + smoke-wizard
 ```
 
 Individually:
@@ -119,6 +120,7 @@ node scripts/unit.mjs        # resolver, permissions, planner, the gate
 node scripts/smoke.mjs         # stdio, 2025 protocol, plus the wizard; no token needed
 node scripts/smoke-modern.mjs  # stdio, 2026-07-28 protocol; no token needed
 node scripts/smoke-http.mjs    # HTTP transport on both protocols, auth, security gates
+node scripts/smoke-wizard.mjs  # the setup wizard, offline, with Discord down, busy, or refusing
 ```
 
 The unit and smoke suites need no Discord token, so anyone can run them. They

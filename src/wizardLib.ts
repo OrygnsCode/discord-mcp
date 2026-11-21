@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { PermissionFlagsBits } from "discord-api-types/v10";
 import { PERMISSION_PRESETS } from "./discord/preflight.js";
 import { withoutBom } from "./textFiles.js";
+import type { SETUP_ERRORS } from "./usageReport.js";
 
 // The pure half of the setup wizard. Everything here is a function of its
 // inputs so the logic that touches user config files is unit tested
@@ -525,4 +526,168 @@ export function addBotToBotsFile(
   );
   bots.push({ name, token, default: bots.length === 0 });
   return serializeBotsFile(bots, servers);
+}
+
+// --- when setup goes wrong ---
+
+// The oldest Node.js major version the server supports, as in "engines" in
+// package.json.
+export const MIN_NODE_MAJOR = 22;
+
+export function nodeMajor(version: string = process.versions.node): number {
+  return Number(version.split(".")[0]);
+}
+
+// Zero-width spaces and joiners: invisible, and picked up by copying text
+// through chat apps and notes.
+const INVISIBLE = new RegExp(
+  `[${[0x200b, 0x200c, 0x200d, 0x2060].map((c) => String.fromCharCode(c)).join("")}]`,
+  "g"
+);
+
+// The markers a terminal puts around pasted text in bracketed paste mode.
+const ESC = String.fromCharCode(27);
+const PASTE_MARKERS = [`${ESC}[200~`, `${ESC}[201~`];
+
+// A pasted token without what copying tends to add to it: invisible
+// characters, spaces and line breaks, surrounding quotes, a "Bot " prefix,
+// and a terminal's paste markers.
+export function cleanToken(raw: string): string {
+  let token = raw;
+  for (const marker of PASTE_MARKERS) token = token.split(marker).join("");
+  token = token.replace(INVISIBLE, "").trim();
+  const quoted = token.match(/^(["'`])(.*)\1$/s);
+  if (quoted) token = quoted[2].trim();
+  token = token.replace(/^Bot\s+/i, "");
+  return token.replace(/\s+/g, "");
+}
+
+// What a pasted token looks like, before Discord sees it. Three shapes
+// cannot even be sent, since fetch refuses them in a request header:
+// "ctrl_v" holds the character Ctrl+V types where a terminal reads it as a
+// key instead of pasting, "control" holds other keys (arrows, Escape,
+// Ctrl combinations), and "unusable" holds any other character no token
+// has. The rest only explain a rejection, by what people paste by mistake:
+// an ID, the Public Key, or the Client Secret (32 characters, no dots).
+export type TokenShape = "ok" | "ctrl_v" | "control" | "unusable" | "id" | "public_key" | "secret" | "odd";
+
+export function tokenShape(token: string): TokenShape {
+  const codes = [...token].map((c) => c.charCodeAt(0));
+  if (codes.includes(22)) return "ctrl_v";
+  if (codes.some((c) => c < 32 || c === 127)) return "control";
+  if (/[^!-~]/.test(token)) return "unusable";
+  if (/^\d{15,22}$/.test(token)) return "id";
+  if (/^[0-9a-f]{64}$/i.test(token)) return "public_key";
+  if (/^[\w-]{30,34}$/.test(token)) return "secret";
+  if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token)) return "odd";
+  return "ok";
+}
+
+// Thrown when discord.com cannot be reached at all, after one retry.
+export class DiscordUnreachable extends Error {
+  constructor(cause: unknown) {
+    super("could not reach discord.com", { cause });
+    this.name = "DiscordUnreachable";
+  }
+}
+
+// Thrown when the terminal fails while the wizard waits for input.
+export class InputFailure extends Error {
+  constructor(cause: unknown) {
+    super("the terminal stopped sending input", { cause });
+    this.name = "InputFailure";
+  }
+}
+
+// The kinds of failure the wizard tells apart, on screen and in its setup
+// report.
+export type SetupFailure = (typeof SETUP_ERRORS)[number];
+
+// An error's chain: the error, what caused it, and so on. A connection
+// tried over several addresses fails with an AggregateError holding each
+// attempt, so its first one is followed when it names no cause.
+function errorChain(err: unknown): object[] {
+  const chain: object[] = [];
+  let e = err;
+  while (e !== null && typeof e === "object" && chain.length < 6 && !chain.includes(e)) {
+    chain.push(e);
+    const { cause, errors } = e as { cause?: unknown; errors?: unknown };
+    e = cause ?? (Array.isArray(errors) ? errors[0] : undefined);
+  }
+  return chain;
+}
+
+// The first string code in an error's chain, like ENOTFOUND.
+export function errorCode(err: unknown): string | undefined {
+  for (const e of errorChain(err)) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
+const CODELESS_TYPES = ["TypeError", "RangeError", "ReferenceError", "SyntaxError"];
+
+// The one word a failed setup reports for its error: its code when that is
+// on the allowed list, "other" when it is not, and for an error with no code
+// "timeout", its type, or "none". Every ERR_SSL_ code is one family, and its
+// exact name differs between platforms, so it is sent as ERR_SSL.
+export function failureCode<T extends string>(err: unknown, allowed: readonly T[]): T {
+  const pick = (word: string): T => (allowed.includes(word as T) ? (word as T) : ("other" as T));
+  const chain = errorChain(err);
+  // A request that ran out of time fails with a code that is a number.
+  if (chain.some((e) => (e as { name?: unknown }).name === "TimeoutError")) return pick("timeout");
+  const code = errorCode(err);
+  if (code) return pick(code.startsWith("ERR_SSL_") ? "ERR_SSL" : code);
+  const name = (err as { name?: unknown } | null)?.name;
+  if (typeof name === "string" && CODELESS_TYPES.includes(name)) return pick(name);
+  return pick("none");
+}
+
+const CERTIFICATE_CODES = /CERT|SELF_SIGNED|UNABLE_TO_|ERR_TLS|ERR_SSL/;
+
+export function failureKind(err: unknown, node: number): SetupFailure {
+  if (err instanceof DiscordUnreachable) {
+    return CERTIFICATE_CODES.test(errorCode(err) ?? "") ? "certificate" : "network";
+  }
+  if (err instanceof InputFailure) return "terminal";
+  // Node's file errors carry the path they were about.
+  if (errorCode(err) && typeof (err as { path?: unknown }).path === "string") return "files";
+  if (node < MIN_NODE_MAJOR) return "old_node";
+  return "other";
+}
+
+// Anything shaped like a bot token: three dot-separated runs of base64.
+const TOKEN_LIKE = /[\w-]{20,}\.[\w-]{4,}\.[\w-]{20,}/g;
+
+// The home folder written as ~, in the forms it shows up in: a plain path,
+// and a file URL's forward slashes. On Windows it holds the user name, and
+// these lines are meant to be pasted into a public issue. Windows paths
+// match whatever their case.
+export function withoutHome(text: string, home: string | undefined): string {
+  if (!home || home.length < 3) return text;
+  const windows = /^[A-Za-z]:[\\/]/.test(home);
+  let out = text;
+  for (const form of new Set([home, home.replace(/\\/g, "/")])) {
+    const escaped = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Only where the folder name ends, so /home/ann leaves /home/anna alone.
+    out = out.replace(new RegExp(`${escaped}(?![\\w.-])`, windows ? "gi" : "g"), "~");
+  }
+  return out;
+}
+
+// An error as one line, for the screen and for an issue: each message in its
+// cause chain with its code, and no token in it.
+export function failureDetails(err: unknown, secrets: Iterable<string> = []): string {
+  const parts = errorChain(err).map((e) => {
+    const x = e as { name?: unknown; message?: unknown; code?: unknown };
+    const code = typeof x.code === "string" ? ` [${x.code}]` : "";
+    return `${typeof x.name === "string" ? x.name : "Error"}: ${String(x.message ?? "")}${code}`;
+  });
+  if (parts.length === 0 && err !== undefined && err !== null) parts.push(String(err));
+  let line = parts.join("; ");
+  for (const secret of secrets) {
+    if (secret.length >= 8) line = line.split(secret).join("<token>");
+  }
+  return line.replace(TOKEN_LIKE, "<token>");
 }

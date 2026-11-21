@@ -43,12 +43,13 @@ function parseArgs(argv: string[]): {
   return { http, port, host };
 }
 
-// The init subcommand runs the interactive setup wizard and exits. "setup"
-// is accepted too, since that is the word people guess first.
+// The init subcommand runs the interactive setup wizard and exits, with
+// code 1 when setup failed. "setup" is accepted too, since that is the word
+// people guess first.
 if (process.argv[2] === "init" || process.argv[2] === "setup") {
   const { runWizard } = await import("./wizard.js");
   await runWizard();
-  process.exit(0);
+  process.exit();
 }
 
 const config = loadConfig();

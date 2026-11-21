@@ -14,7 +14,7 @@
 
 ## Checklist
 
-- [ ] `npm test` passes (build, unit, smoke, smoke-modern, smoke-dialog, smoke-http)
+- [ ] `npm test` passes (build, unit, smoke, smoke-modern, smoke-dialog, smoke-http, smoke-wizard)
 - [ ] Commits are signed off (`git commit -s`), per CONTRIBUTING.md
 - [ ] No secrets committed, and nothing new writes to stdout
 

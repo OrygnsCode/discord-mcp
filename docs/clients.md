@@ -52,8 +52,10 @@ runs it on its built-in one.
 1. Download `discord-mcp.mcpb` from the
    [latest release](https://github.com/OrygnsCode/discord-mcp/releases/latest).
 2. Open it with Claude Desktop, or drag it onto Settings > Desktop app >
-   Extensions (Manage). On Windows, double-clicking the file may open a
-   "Pick an app" box instead of Claude; dragging it in always works.
+   Extensions (Manage). Drop it on the Extensions area at the top of that
+   page; on the Local MCP servers list below it, nothing happens. On
+   Windows, double-clicking the file may open a "Pick an app" box instead of
+   Claude; dragging it in always works.
 3. Claude shows what it is installing, then a form for its settings: paste
    your bot token, and optionally a default server id. Read-only mode,
    allowed servers, and usage stats are there too.

@@ -5,6 +5,20 @@ to run a setup check; it reports each part of the setup and how to fix what
 is wrong. If you are an AI assistant helping someone, run that check first
 and read the results back.
 
+## The setup wizard stops, or will not take the token
+
+- It says Ctrl+V came through as a key: some terminals, Windows ones
+  especially, do not paste with Ctrl+V while typing is hidden. Paste with a
+  right-click instead (Cmd+V on macOS, Ctrl+Shift+V on Linux).
+- It says it could not reach Discord: check that discord.com opens in your
+  browser. A VPN, proxy, firewall, or antivirus can keep Node.js from
+  reaching it even when the browser can.
+- It says it could not make a secure connection: antivirus web scanning, a
+  proxy, or a work or school network is in the way. Turn off the
+  antivirus's HTTPS scanning, or try another network.
+- In Claude Desktop, the [bundle](clients.md#the-bundle) needs no wizard
+  and no Node.js of your own.
+
 ## The tools do not appear in my AI client
 
 Almost always the client needs a full restart to pick up a new MCP server.
@@ -159,6 +173,8 @@ so you can fix it before it breaks.
 - Double-clicking `discord-mcp.mcpb` opens a "Pick an app" box: that Windows
   install has nothing registered for the file type. Drag the file onto
   Settings > Desktop app > Extensions (Manage) instead.
+- Dragging the file in does nothing: drop it on the Extensions area at the
+  top of the page. The Local MCP servers list below it does not take it.
 - The tools say there is no token although you saved one: Claude ignores the
   "Save these settings?" box if its window loses focus while the box is open,
   and keeps the old settings. Open Settings > Desktop app > Extensions >

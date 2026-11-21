@@ -27,7 +27,8 @@ no ID for your install.
 - Only on a day the install actually reaches Discord. An install with no bot
   token, or one that only lists its tools, sends nothing.
 - A day's tool counts are sent with the next day's report.
-- The setup wizard sends one short report when it finishes.
+- The setup wizard sends one short report when it ends, including when you
+  quit it.
 
 ### What a daily report holds
 
@@ -56,11 +57,24 @@ And for each of the last few days it was used (up to seven):
 | Errors | Failed calls by kind (missing permission, intents off, rate limited, not found, invalid parameters, no token, network, other), in the same bands. |
 | AI apps | Which apps from the fixed list were used that day. |
 
-The setup wizard's report holds the version, operating system, how it was
-installed, which path the wizard took (first setup, adding a bot,
-re-registering, or upgrading), how it ended (completed, unfinished, cancelled,
-or failed), and where it registered the server (Claude Desktop, Claude Code,
-Cursor, Windsurf, or a printed snippet).
+### What the setup wizard's report holds
+
+Every value is one of a fixed list, or a version number.
+
+| Field | Values |
+|---|---|
+| Version, operating system, install | As in the daily report. |
+| Node.js | Its major version, like `22`. |
+| Path | First setup, adding a bot, re-registering, or upgrading. |
+| Outcome | Completed, unfinished, cancelled, or failed. |
+| Apps | Where it registered the server: Claude Desktop, Claude Code, Cursor, Windsurf, or a printed snippet. |
+| What went wrong along the way | Any of these: a token prompt that could not hide what was typed; a token that came with spaces, quotes, or invisible characters to take out; Ctrl+V or other keys typed where the token should have been pasted; a token with characters no token has; a token Discord rejected, and whether it looked like the Client Secret, the Public Key, or an ID; Discord answering busy, blocked, or with an error of its own; a connection that worked only on a second try; intents that were off; a bot in no server yet, or whose servers could not be listed; a copy out of npx's cache that failed; an app config file that was not valid JSON. |
+| Step | For a setup that did not complete, the step it stopped at: starting, the token, the intents, naming the bot, the invite, the default server, saving, or registering. |
+| Error | For a setup that failed, the kind of error (network, certificate, files, terminal, a Node.js older than it supports, or other) and its code from a fixed list, like `ENOTFOUND` or `EPERM`. |
+| Report number | A random number, so a report sent twice is counted once. |
+
+The error's own text is never sent. It can hold your file paths, your user
+name, or even your bot token.
 
 ### Where it goes
 

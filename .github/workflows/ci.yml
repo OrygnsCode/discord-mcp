@@ -68,6 +68,9 @@ jobs:
       - name: HTTP transport smoke test
         run: node scripts/smoke-http.mjs
 
+      - name: Setup wizard smoke test
+        run: node scripts/smoke-wizard.mjs
+
       # Once, not per platform: the Claude Desktop bundle the release
       # attaches, built and validated from this commit.
       - name: Claude Desktop bundle builds

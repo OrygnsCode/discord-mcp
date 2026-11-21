@@ -9672,8 +9672,10 @@ try {
     const y = r.days?.[0];
     check(r.days?.length === 1 && y.d === yesterday && y.tools.send_message === "10-99" && y.tools.read_messages === "1-9" && y.gate.preview === "1-9" && y.gate.confirmed === "1-9" && y.errors.permission === "1-9" && y.apps.sort().join() === "claude-desktop,cursor", `usage: yesterday's counts, added up across processes and banded (${JSON.stringify(y)})`);
     check(!fs.readdirSync(usage).some((n) => n.startsWith(`day-${yesterday}`)), "usage: and once the receiver took them, they are gone");
-    const flat = JSON.stringify(r);
-    check(!/unit-usage-token|unitbotname|\d{17,}/.test(flat), "usage: no token, bot name or id anywhere in it");
+    // The report number is random hex, which now and then holds 17 digits in
+    // a row, so it is left out of the look for an id.
+    const flat = JSON.stringify({ ...r, nonce: undefined });
+    check(!/unit-usage-token|unitbotname|\d{17,}/.test(flat), `usage: no token, bot name or id anywhere in it (${flat})`);
     const state = JSON.parse(fs.readFileSync(path.join(usage, "state.json"), "utf8"));
     check(state.sent_day === today && state.first_seen === today && state.active.join() === today, "usage: the state says today went out");
 
@@ -9701,7 +9703,9 @@ try {
     fs.rmSync(path.join(usage, "state.json"), { force: true });
     answer = false;
     report.__testing.use({ post, env }, cfg);
-    const t0 = new Date();
+    // Noon of the test's day, so the retry sixteen minutes on is the same
+    // day however close to midnight UTC the suite runs.
+    const t0 = new Date(`${today}T12:00:00.000Z`);
     check((await report.sendIfDue(t0)) === "failed" && sent.length === 2, "usage: a failed send is a failure");
     const failedState = JSON.parse(fs.readFileSync(path.join(usage, "state.json"), "utf8"));
     check(failedState.failures === 1 && Date.parse(failedState.next_try_at) - t0.getTime() === 15 * 60_000 && !failedState.sent_day, "usage: and waits fifteen minutes");
@@ -9765,7 +9769,23 @@ try {
     report.__testing.use({ post, env }, cfg);
     await report.sendSetupEvent({ flow: "fresh", outcome: "completed", apps: ["claude-desktop", "claude-desktop", "cursor"] });
     const s = sent.at(-1);
-    check(s.url.endsWith("/discord-mcp/v1/setup") && JSON.stringify(Object.keys(s.body).sort()) === JSON.stringify(["apps", "day", "flow", "install", "kind", "nonce", "os", "outcome", "s", "v"]) && s.body.apps.join() === "claude-desktop,cursor" && s.body.kind === "setup", `usage: the wizard sends one setup event (${JSON.stringify(s.body)})`);
+    check(s.url.endsWith("/discord-mcp/v1/setup") && JSON.stringify(Object.keys(s.body).sort()) === JSON.stringify(["apps", "day", "flow", "install", "kind", "node", "nonce", "os", "outcome", "s", "v"]) && s.body.apps.join() === "claude-desktop,cursor" && s.body.kind === "setup", `usage: the wizard sends one setup event (${JSON.stringify(s.body)})`);
+    check(s.body.node === process.versions.node.split(".")[0] && /^[1-9]\d$/.test(s.body.node), `usage: with the major Node.js version only (${s.body.node})`);
+    await report.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step: "token", error: "network", code: "ENOTFOUND" });
+    const failedRun = sent.at(-1).body;
+    check(failedRun.step === "token" && failedRun.error === "network" && failedRun.code === "ENOTFOUND" && Object.keys(failedRun).length === 14, `usage: a failed run says where it stopped, the kind of error, and its code (${JSON.stringify(failedRun)})`);
+    await report.sendSetupEvent({ flow: "fresh", outcome: "failed", apps: [], step: "token", error: "other" });
+    check(sent.at(-1).body.code === "none", "usage: a failed run with no code says none");
+    await report.sendSetupEvent({ flow: "fresh", outcome: "cancelled", apps: [], step: "invite", error: "network", code: "ENOTFOUND" });
+    const cancelledRun = sent.at(-1).body;
+    check(cancelledRun.step === "invite" && !("error" in cancelledRun) && !("code" in cancelledRun), "usage: a cancelled run says where it stopped, and no error or code");
+    await report.sendSetupEvent({ flow: "fresh", outcome: "completed", apps: [], step: "register", error: "files", code: "EPERM" });
+    const completedRun = sent.at(-1).body;
+    check(!("step" in completedRun) && !("error" in completedRun) && !("code" in completedRun) && !("trouble" in completedRun), "usage: a completed run with nothing going wrong says none of them");
+    await report.sendSetupEvent({ flow: "fresh", outcome: "completed", apps: [], trouble: ["token_secret", "intents_off", "token_secret"] });
+    check(sent.at(-1).body.trouble?.join() === "token_secret,intents_off", `usage: trouble along the way is sent for any outcome, once each (${JSON.stringify(sent.at(-1).body.trouble)})`);
+    await report.sendSetupEvent({ flow: "fresh", outcome: "completed", apps: [], trouble: [] });
+    check(!("trouble" in sent.at(-1).body), "usage: and left out when there was none");
     const before = sent.length;
     report.__testing.use({ post, env: { DISCORD_MCP_TELEMETRY: "off" } }, cfg);
     await report.sendSetupEvent({ flow: "fresh", outcome: "completed", apps: [] });
@@ -9854,6 +9874,142 @@ try {
   const notInGuide = ["READ_ONLY", "ALLOWED_SERVERS", "TELEMETRY"].filter((n) => !guide.includes(`| \`DISCORD_MCP_${n}\` |`));
   check(notInReadme.length === 0, `docs: every DISCORD_MCP_ setting has a row in the README's table (missing: ${notInReadme.join(", ") || "none"})`);
   check(notInGuide.length === 0, `docs: the new settings are in the getting started table too (missing: ${notInGuide.join(", ") || "none"})`);
+}
+
+// When setup goes wrong: the token as pasted, and what stopped it. Tokens
+// are built here rather than written out, so nothing token-shaped sits in
+// the source.
+{
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const lib = await import("../dist/wizardLib.js");
+  const { cleanToken, tokenShape, failureKind, failureDetails, errorCode, DiscordUnreachable, InputFailure } = lib;
+  const token = ["A".repeat(26), "b".repeat(6), "C_-".repeat(13)].join(".");
+  const zwsp = String.fromCharCode(0x200b);
+  const nbsp = String.fromCharCode(0xa0);
+
+  check(cleanToken(`  ${token}\r\n`) === token && cleanToken(`${zwsp}${token}${zwsp}`) === token && cleanToken(`${token.slice(0, 10)}${nbsp}${token.slice(10)}`) === token, "token: spaces, line breaks, and invisible characters copied along are dropped");
+  check(cleanToken(`"${token}"`) === token && cleanToken(`'${token}'`) === token && cleanToken(`Bot ${token}`) === token, "token: so are surrounding quotes and a Bot prefix");
+  check(tokenShape(token) === "ok", "token: a bot token's shape is ok");
+  check(tokenShape(`${token}${String.fromCharCode(0x2026)}`) === "unusable" && tokenShape(`${token}${String.fromCharCode(0xe9)}`) === "unusable", "token: a character outside plain ASCII makes it unusable");
+  // Why that is checked before calling Discord: fetch throws on it.
+  let headerRefused = false;
+  try {
+    new Headers({ Authorization: `Bot ${token}${String.fromCharCode(0x2026)}` });
+  } catch {
+    headerRefused = true;
+  }
+  check(headerRefused, "token: fetch refuses such a token in a header");
+  const ctrlV = String.fromCharCode(22);
+  const esc = String.fromCharCode(27);
+  check(tokenShape(ctrlV) === "ctrl_v" && tokenShape(`${token}${ctrlV}`) === "ctrl_v", "token: the character Ctrl+V types is told apart");
+  check(tokenShape(`${token}${esc}[A`) === "control" && tokenShape(`a${String.fromCharCode(1)}b`) === "control" && tokenShape(`a${String.fromCharCode(127)}`) === "control", "token: so are other keys, like an arrow, Ctrl+A, or Delete");
+  check(cleanToken(`${esc}[200~${token}${esc}[201~`) === token && tokenShape(cleanToken(`${esc}[200~${token}${esc}[201~`)) === "ok", "token: a terminal's paste markers are taken off");
+  // Why those are caught before calling Discord: fetch refuses them too,
+  // though the Headers check alone lets them through.
+  {
+    const http = await import("node:http");
+    const server = http.createServer((q, r) => r.end("{}"));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    let refused = "";
+    try {
+      new Headers({ Authorization: `Bot ${ctrlV}` });
+      await fetch(`http://127.0.0.1:${server.address().port}/`, { headers: { Authorization: `Bot ${token}${ctrlV}` } });
+    } catch (err) {
+      refused = `${err.message} / ${err.cause?.message ?? ""}`;
+    }
+    server.close();
+    check(refused.includes("header"), `token: fetch refuses a token with Ctrl+V in it (${refused})`);
+  }
+  check(tokenShape("123456789012345678") === "id" && tokenShape("ab12".repeat(16)) === "public_key" && tokenShape("aB3_-".repeat(6) + "xy") === "secret" && tokenShape("abc.def") === "odd" && tokenShape("hello") === "odd", "token: an ID, the public key, the client secret, and anything else odd are told apart");
+
+  const withCode = (code) => new DiscordUnreachable(new TypeError("fetch failed", { cause: Object.assign(new Error(`connect ${code} discord.com`), { code }) }));
+  check(failureKind(withCode("ENOTFOUND"), 22) === "network" && failureKind(withCode("ECONNRESET"), 22) === "network" && failureKind(withCode("UND_ERR_CONNECT_TIMEOUT"), 22) === "network", "failure: no connection to Discord is network");
+  check(failureKind(new DiscordUnreachable(new DOMException("The operation was aborted due to timeout", "TimeoutError")), 22) === "network", "failure: no answer in time is network");
+  check(["SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID", "DEPTH_ZERO_SELF_SIGNED_CERT"].every((c) => failureKind(withCode(c), 22) === "certificate"), "failure: a refused certificate is certificate");
+  let fileError;
+  try {
+    const empty = fs.mkdtempSync(path.join(tmpdir(), "dmcp-fail-"));
+    try {
+      fs.readFileSync(path.join(empty, "missing", "file.json"));
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  } catch (err) {
+    fileError = err;
+  }
+  check(failureKind(fileError, 22) === "files" && failureKind(Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM", path: "C:\\x\\claude_desktop_config.json" }), 22) === "files", "failure: a file that could not be read or written is files");
+  check(failureKind(new InputFailure(new Error("EIO")), 22) === "terminal", "failure: a terminal that failed is terminal");
+  check(failureKind(new TypeError("x is not a function"), 20) === "old_node" && failureKind(new TypeError("x is not a function"), 22) === "other" && failureKind(null, 24) === "other" && failureKind("thrown text", 22) === "other", "failure: anything else is old_node below Node 22, otherwise other");
+  check(errorCode(withCode("EAI_AGAIN")) === "EAI_AGAIN" && errorCode(new Error("x")) === undefined && errorCode(null) === undefined, "failure: the code is found down the cause chain");
+
+  const details = failureDetails(withCode("ENOTFOUND"));
+  check(details.includes("DiscordUnreachable") && details.includes("fetch failed") && details.includes("[ENOTFOUND]"), `failure: the details line carries each cause and its code (${details})`);
+  check(!failureDetails(new Error(`bad header "Bot ${token}"`), [token]).includes(token) && failureDetails(new Error(`bad "${token}"`), [token]).includes("<token>"), "failure: a token entered never shows in the details");
+  check(!failureDetails(new Error(`seen ${token} here`)).includes(token), "failure: nor does anything shaped like one");
+  check(failureDetails("boom") === "boom" && failureDetails(undefined) === "", "failure: something thrown that is not an error still prints");
+
+  // The code a failed setup reports. Real failures first, from fetch itself,
+  // against local servers and a name that cannot exist.
+  const { SETUP_CODES } = await import("../dist/usageReport.js");
+  const { failureCode } = lib;
+  const net = await import("node:net");
+  const listen = (server) => new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+  const realFailure = async (url, init) => {
+    try {
+      await fetch(url, init);
+      return undefined;
+    } catch (err) {
+      return new DiscordUnreachable(err);
+    }
+  };
+  const closed = net.createServer();
+  const closedPort = await listen(closed);
+  await new Promise((resolve) => closed.close(resolve));
+  const silent = net.createServer(() => {});
+  const silentPort = await listen(silent);
+  const dropper = net.createServer((socket) => socket.destroy());
+  const dropPort = await listen(dropper);
+  const refused = await realFailure(`http://127.0.0.1:${closedPort}/`);
+  const timedOut = await realFailure(`http://127.0.0.1:${silentPort}/`, { signal: AbortSignal.timeout(300) });
+  const dropped = await realFailure(`http://127.0.0.1:${dropPort}/`);
+  const unknownName = await realFailure("https://no-such-host.invalid/");
+  silent.close();
+  dropper.close();
+  check(failureCode(refused, SETUP_CODES) === "ECONNREFUSED" && failureKind(refused, 22) === "network", `code: a refused connection, from a real one (${failureDetails(refused)})`);
+  check(failureCode(timedOut, SETUP_CODES) === "timeout" && failureKind(timedOut, 22) === "network", `code: no answer in time is timeout, though its own code is a number (${failureDetails(timedOut)})`);
+  check(["ECONNRESET", "UND_ERR_SOCKET"].includes(failureCode(dropped, SETUP_CODES)), `code: a dropped connection, as this Node.js names it (${failureDetails(dropped)})`);
+  check(["ENOTFOUND", "EAI_AGAIN"].includes(failureCode(unknownName, SETUP_CODES)), `code: a name that cannot be found (${failureDetails(unknownName)})`);
+  // Shapes seen on other platforms: Windows tries both addresses of
+  // localhost and fails with an AggregateError, and the same TLS problem
+  // has a different ERR_SSL_ name on Windows and Linux.
+  const both = new DiscordUnreachable(new TypeError("fetch failed", { cause: Object.assign(new AggregateError([Object.assign(new Error("connect ECONNREFUSED ::1:1"), { code: "ECONNREFUSED" }), Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED" })], ""), {}) }));
+  check(failureCode(both, SETUP_CODES) === "ECONNREFUSED" && failureDetails(both).includes("connect ECONNREFUSED ::1:1"), "code: an AggregateError is followed into its first attempt");
+  check(failureCode(withCode("ERR_SSL_PACKET_LENGTH_TOO_LONG"), SETUP_CODES) === "ERR_SSL" && failureCode(withCode("ERR_SSL_WRONG_VERSION_NUMBER"), SETUP_CODES) === "ERR_SSL" && failureKind(withCode("ERR_SSL_WRONG_VERSION_NUMBER"), 22) === "certificate", "code: every ERR_SSL_ code is ERR_SSL, a secure-connection failure");
+  check(failureCode(withCode("DEPTH_ZERO_SELF_SIGNED_CERT"), SETUP_CODES) === "DEPTH_ZERO_SELF_SIGNED_CERT" && failureCode(fileError, SETUP_CODES) === "ENOENT", "code: a code on the list is sent as it is");
+  check(failureCode(withCode("EWHATEVER"), SETUP_CODES) === "other" && failureCode(withCode("EACCES C:\\Users\\someone"), SETUP_CODES) === "other", "code: one not on the list is other, never its own text");
+  check(failureCode(new TypeError("x is not a function"), SETUP_CODES) === "TypeError" && failureCode(new Error("x"), SETUP_CODES) === "none" && failureCode(Object.assign(new Error("x"), { code: 13 }), SETUP_CODES) === "none" && failureCode(null, SETUP_CODES) === "none" && failureCode("text", SETUP_CODES) === "none", "code: an error with no code is its type, or none");
+  const loop = new Error("loops");
+  loop.cause = loop;
+  check(failureCode(loop, SETUP_CODES) === "none" && failureDetails(loop) === "Error: loops", "code: an error that is its own cause does not loop for ever");
+  const { withoutHome } = lib;
+  check(withoutHome("EPERM: open 'C:\\Users\\Some.One\\AppData\\x.json'", "C:\\Users\\Some.One") === "EPERM: open '~\\AppData\\x.json'", "home: a Windows path shows the home folder as ~");
+  check(withoutHome("at f (file:///C:/Users/Some.One/AppData/Local/npm-cache/_npx/x/index.js:1:2)", "C:\\Users\\Some.One") === "at f (file:///~/AppData/Local/npm-cache/_npx/x/index.js:1:2)", "home: so does a file URL in a stack line");
+  check(withoutHome("open 'c:\\users\\some.one\\x'", "C:\\Users\\Some.One") === "open '~\\x'", "home: in any case, on Windows");
+  check(withoutHome("open '/home/someone/x' and /home/someone", "/home/someone") === "open '~/x' and ~" && withoutHome("open '/Home/someone/x'", "/home/someone") === "open '/Home/someone/x'", "home: elsewhere, with case kept");
+  check(withoutHome("/home/ann/x /home/anna/y /home/ann.b/z", "/home/ann") === "~/x /home/anna/y /home/ann.b/z" && withoutHome("C:\\Users\\Ann\\x C:\\Users\\Anna\\y", "C:\\Users\\Ann") === "~\\x C:\\Users\\Anna\\y", "home: only where the folder name ends");
+  check(withoutHome("C:\\Users\\a.b\\x", "C:\\Users\\a.b") === "~\\x" && withoutHome("C:\\Users\\aXb\\x", "C:\\Users\\a.b") === "C:\\Users\\aXb\\x", "home: a dot in the name is a dot, not any character");
+  check(withoutHome("text", undefined) === "text" && withoutHome("/x/y", "/") === "/x/y", "home: no home folder, or a root one, changes nothing");
+  const everything = [refused, timedOut, dropped, unknownName, both, withCode("ERR_SSL_X"), withCode("EWHATEVER"), fileError, new TypeError("t"), new Error("e"), null, loop];
+  check(everything.every((e) => SETUP_CODES.includes(failureCode(e, SETUP_CODES))), "code: whatever is thrown, the code sent is one on the list");
+
+  const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  check(pkg.engines.node === `>=${lib.MIN_NODE_MAJOR}` && lib.nodeMajor("20.11.1") === 20 && lib.nodeMajor() === Number(process.versions.node.split(".")[0]), "wizard: its Node.js minimum is the one in package.json");
+
+  const { SETUP_ERRORS } = await import("../dist/usageReport.js");
+  const kinds = [failureKind(withCode("ENOTFOUND"), 22), failureKind(withCode("CERT_HAS_EXPIRED"), 22), failureKind(fileError, 22), failureKind(new InputFailure(1), 22), failureKind(1, 20), failureKind(1, 22)];
+  check(JSON.stringify([...new Set(kinds)].sort()) === JSON.stringify([...SETUP_ERRORS].sort()), "wizard: every kind of failure it tells apart can be reported, and no other");
 }
 
 if (failures > 0) {

@@ -45,6 +45,27 @@ const ERRORS = new Set(['permission', 'intents', 'rate_limited', 'not_found', 'v
 const FLOWS = new Set(['fresh', 'add_bot', 'reregister', 'upgrade']);
 const OUTCOMES = new Set(['completed', 'unfinished', 'cancelled', 'failed']);
 const SETUP_APPS = new Set(['claude-desktop', 'claude-code', 'cursor', 'windsurf', 'snippet', 'other']);
+const SETUP_STEPS = new Set(['start', 'token', 'intents', 'name', 'invite', 'server', 'save', 'register']);
+const SETUP_ERRORS = new Set(['network', 'certificate', 'files', 'terminal', 'old_node', 'other']);
+const SETUP_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH',
+  'EHOSTUNREACH', 'ENETDOWN', 'ECONNABORTED', 'EPIPE', 'EPROTO', 'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'timeout',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID', 'CERT_UNTRUSTED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_SSL',
+  'EACCES', 'EPERM', 'EBUSY', 'ENOSPC', 'EROFS', 'ENOENT', 'EEXIST', 'ENOTDIR', 'EISDIR',
+  'EMFILE', 'ENFILE', 'EIO', 'ELOOP', 'ENAMETOOLONG', 'EXDEV', 'EINVAL', 'UNKNOWN',
+  'ENOTTY', 'EBADF', 'EAGAIN',
+  'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
+  'none', 'other',
+]);
+const SETUP_TROUBLE = new Set([
+  'input_visible', 'token_cleaned', 'token_ctrl_v', 'token_control', 'token_unusable', 'token_secret', 'token_id', 'token_public_key',
+  'token_rejected', 'discord_429', 'discord_403', 'discord_5xx', 'discord_other', 'network_retry',
+  'intents_off', 'no_servers', 'servers_unlisted', 'npx_copy_failed', 'config_invalid',
+]);
+const NODE_RE = /^[1-9]\d$/;
 
 export default {
   async fetch(request, env) {
@@ -188,14 +209,25 @@ export function cleanPing(body, now) {
   };
 }
 
+// From 2.1.1 a run also says which major Node.js it ran on and what went
+// wrong along the way; one that did not complete, where it stopped; and one
+// that failed, the kind of error and its code. Earlier versions send none of
+// these, and nothing is counted for a field that is not there.
 export function cleanSetup(body) {
+  const outcome = pick(body.outcome, OUTCOMES);
+  const trouble = Array.isArray(body.trouble) ? body.trouble.slice(0, SETUP_TROUBLE.size) : [];
   return {
     v: version(body.v),
     os: pick(body.os, OS),
     install: pick(body.install, INSTALLS),
     flow: pick(body.flow, FLOWS),
-    outcome: pick(body.outcome, OUTCOMES),
+    outcome,
     apps: [...new Set((Array.isArray(body.apps) ? body.apps : []).slice(0, 5).map((a) => pick(a, SETUP_APPS)))],
+    ...(body.node !== undefined ? { node: typeof body.node === 'string' && NODE_RE.test(body.node) ? body.node : 'other' } : {}),
+    ...(trouble.length > 0 ? { trouble: [...new Set(trouble.map((t) => pick(t, SETUP_TROUBLE)))] } : {}),
+    ...(outcome !== 'completed' && body.step !== undefined ? { step: pick(body.step, SETUP_STEPS) } : {}),
+    ...(outcome === 'failed' && body.error !== undefined ? { error: pick(body.error, SETUP_ERRORS) } : {}),
+    ...(outcome === 'failed' && body.error !== undefined && body.code !== undefined ? { code: pick(body.code, SETUP_CODES) } : {}),
   };
 }
 
@@ -238,6 +270,11 @@ export function setupRows(r, today) {
     [today, 'setup_install', r.install],
   ];
   for (const app of r.apps) rows.push([today, 'setup_app', app]);
+  if (r.node) rows.push([today, 'setup_node', `${r.outcome}|${r.node}`]);
+  for (const t of r.trouble ?? []) rows.push([today, 'setup_trouble', `${r.outcome}|${t}`]);
+  if (r.step) rows.push([today, 'setup_step', `${r.outcome}|${r.step}`]);
+  if (r.error) rows.push([today, 'setup_error', `${r.step ?? '-'}|${r.error}`]);
+  if (r.code) rows.push([today, 'setup_code', `${r.error}|${r.code}`]);
   return rows;
 }
 

@@ -88,8 +88,10 @@ Already have a bot token? These add discord-mcp to your app directly:
 - **Cursor** has a field for the token in its install box.
 - **Claude Desktop** downloads the bundle, which runs on Claude's own Node.
   Open it with Claude Desktop, or drag it onto Settings > Desktop app >
-  Extensions (on Windows, double-clicking may not open Claude). Fill in the
-  token in the form that opens, save, and switch the extension on. The
+  Extensions (on Windows, double-clicking may not open Claude). Drop it on
+  the Extensions area at the top of that page; on the Local MCP servers list
+  below it, nothing happens. Fill in the token in the form that opens, save,
+  and switch the extension on. The
   bundle does not update itself: to update, open the newest one the same way.
   Claude offers Update and keeps your token and settings.
 
@@ -351,6 +353,7 @@ node scripts/smoke.mjs         # stdio session on the 2025 protocol, plus the wi
 node scripts/smoke-modern.mjs  # stdio session on the 2026-07-28 protocol; no token needed
 node scripts/smoke-dialog.mjs  # the confirmation dialog end to end; no token needed
 node scripts/smoke-http.mjs    # HTTP transport on both protocols, auth, security gates
+node scripts/smoke-wizard.mjs  # the setup wizard, offline, with Discord down, busy, or refusing
 node scripts/acceptance.mjs    # live end-to-end against a disposable test server
 cd telemetry && npm test       # the usage stats receiver, on a local copy of its runtime
 ```

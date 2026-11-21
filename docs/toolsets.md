@@ -100,7 +100,7 @@ In stdio mode the startup line on stderr also names the active groups, so you
 can confirm what a session loaded:
 
 ```
-discord-mcp v2.1.0 on stdio (toolsets: core, messaging, moderation)
+discord-mcp v2.1.1 on stdio (toolsets: core, messaging, moderation)
 ```
 
 ## Adding a tool
