@@ -7990,6 +7990,34 @@ try {
     process.env.DISCORD_MCP_FILES_DIR = path.join(root, "nope");
     f = readLocalFile("fire.png", 262144);
     check(!f.ok && /does not exist or is not a folder/.test(f.error), "files: a folder that does not exist is said to be");
+
+    // The folder set through a link (on macOS the temp folder itself is
+    // one, /var leads to /private/var). A full path written the way the
+    // setting names the folder is inside it, and so is one to where the
+    // folder really is; climbing out of either is not.
+    const viaLink = path.join(root, "uploads-link");
+    let aliased = false;
+    try { fs.symlinkSync(folder, viaLink, "junction"); aliased = true; } catch {}
+    check(aliased, "files: a link to the folder could be made to test with");
+    if (aliased) {
+      process.env.DISCORD_MCP_FILES_DIR = viaLink;
+      f = readLocalFile("fire.png", 262144);
+      check(f.ok && f.data.equals(small), "files: set through a link, a name is read");
+      f = readLocalFile(path.join(viaLink, "sub", "wave.png"), 262144);
+      check(f.ok && f.data.equals(small), `files: set through a link, a full path through that link is read (${f.ok ? "" : f.error})`);
+      f = readLocalFile(path.join(fs.realpathSync(folder), "fire.png"), 262144);
+      check(f.ok, `files: and so is the full path to where the folder really is (${f.ok ? "" : f.error})`);
+      f = readLocalFile(`${viaLink}${path.sep}..${path.sep}outside.png`, 262144);
+      check(!f.ok && /not inside the files folder/.test(f.error), `files: set through a link, climbing out of it is refused (${f.ok ? "read!" : f.error})`);
+      f = readLocalFile(`${viaLink}${path.sep}..${path.sep}no-such-file.png`, 262144);
+      check(!f.ok && /not inside the files folder/.test(f.error) && !/There is no file/.test(f.error), "files: with the same answer whether or not the file outside exists");
+      f = readLocalFile(path.join(viaLink, "missing.png"), 262144);
+      check(!f.ok && /There is no file named/.test(f.error), "files: a missing file named through the link is said to be missing");
+      if (joined) {
+        f = readLocalFile(path.join(viaLink, "door", "outside.png"), 262144);
+        check(!f.ok && /not inside the files folder/.test(f.error), `files: set through a link, a folder link inside it that leads out is still refused (${f.ok ? "read!" : f.error})`);
+      }
+    }
     process.env.DISCORD_MCP_FILES_DIR = folder;
 
     // Through the loader: the file's own bytes decide what it is.

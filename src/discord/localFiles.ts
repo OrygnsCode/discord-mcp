@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { quoted } from "./names.js";
 import { setting, settingSource } from "../settings.js";
 
@@ -48,10 +48,21 @@ export function readLocalFile(name: string, maxBytes: number): LocalFile {
     return { ok: false, error: `The files folder set in ${settingSource("FILES_DIR")} does not exist or is not a folder: ${dir}.` };
   }
   // Outside by its path alone is refused before anything is looked up, so
-  // whether a file exists elsewhere on this machine is never revealed.
-  const wanted = resolve(root, name);
+  // whether a file exists elsewhere on this machine is never revealed. A
+  // full path may name the folder the way the setting does rather than
+  // where it really is (on macOS /var is a link to /private/var), so a path
+  // inside the folder as set is moved onto the real folder first.
+  let wanted = resolve(root, name);
   if (!inside(wanted, root)) {
-    return { ok: false, error: `${quoted(name)} is not inside the files folder, and only that folder is read.` };
+    const asSet = resolve(dir);
+    const named = resolve(asSet, name);
+    if (asSet === root || !inside(named, asSet)) {
+      return { ok: false, error: `${quoted(name)} is not inside the files folder, and only that folder is read.` };
+    }
+    wanted = resolve(root, relative(asSet, named));
+    if (!inside(wanted, root)) {
+      return { ok: false, error: `${quoted(name)} is not inside the files folder, and only that folder is read.` };
+    }
   }
   let real: string;
   try {
