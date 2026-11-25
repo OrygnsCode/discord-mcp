@@ -46,6 +46,11 @@ export interface UndoLive {
   // Roles of the members a change gave or took a role from; null for a
   // member who has left.
   memberRoles?: Record<string, string[] | null>;
+  // The server's custom emoji, stickers, and soundboard sounds, each read
+  // only when a change being undone has that kind in it.
+  emojis?: Array<{ id: string; name: string }>;
+  stickers?: Array<{ id: string; name: string }>;
+  sounds?: Array<{ id: string; name: string }>;
   // Where items recreated by earlier undos live now: old id to new id. A
   // record made before the item was deleted and recreated still names the
   // old id, and must reach the item that stands in its place.
@@ -150,7 +155,7 @@ function label(kind: ItemKind, name: string, channelType?: number): string {
   return itemLabel(kind, name, channelType);
 }
 
-const isFinished = (e: RecordEntry) => e.undo?.status === "done" || e.undo?.status === "skipped";
+export const isFinished = (e: RecordEntry) => e.undo?.status === "done" || e.undo?.status === "skipped";
 
 export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
   const channelById = new Map(live.channels.map((c) => [c.id, c]));
@@ -162,6 +167,13 @@ export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
   const deleteChannels: UndoAction[] = [];
   const deleteCategories: UndoAction[] = [];
   const deleteRoles: UndoAction[] = [];
+  const recreateEmojis: UndoAction[] = [];
+  const deleteEmojis: UndoAction[] = [];
+  // Emoji, stickers, and sounds: what of each the server has now.
+  const listOf = (kind: "emoji" | "sticker" | "sound") =>
+    (kind === "emoji" ? live.emojis : kind === "sticker" ? live.stickers : live.sounds) ?? [];
+  const isExpression = (kind: ItemKind): kind is "emoji" | "sticker" | "sound" =>
+    kind === "emoji" || kind === "sticker" || kind === "sound";
   const entries = forwarded(record, live.aliases);
   const createdIds = new Set(
     entries.filter((e) => e.op === "created").map((e) => e.id)
@@ -196,6 +208,15 @@ export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
             "and this reaches the one that replaced it.",
         ]
       : [];
+
+    if (e.op === "created" && isExpression(e.kind)) {
+      if (!listOf(e.kind).some((x) => x.id === e.id)) {
+        restores.push({ type: "skip", entry: i, name: e.name, lines: [`${label(e.kind, e.name)} is already gone.`] });
+        return;
+      }
+      deleteEmojis.push({ type: "delete", entry: i, kind: e.kind, id: e.id, name: e.name, lines: [`Delete ${label(e.kind, e.name)}, which this change created.`] });
+      return;
+    }
 
     if (e.op === "created") {
       const exists = e.kind === "role" ? roleById.has(e.id) : channelById.has(e.id);
@@ -362,6 +383,44 @@ export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
     // follow-up work (giving the role back, its overwrites, moving channels
     // into a category), is not such a clash: the rest still has to happen.
     const resumeId = e.undo?.status === "failed" ? e.undo.newId : undefined;
+    if (e.kind === "emoji" || e.kind === "sticker" || e.kind === "sound") {
+      const what = e.kind === "emoji" ? "picture" : e.kind === "sticker" ? "image" : "sound file";
+      if (resumeId && listOf(e.kind).some((x) => x.id === resumeId)) {
+        recreateEmojis.push({ type: "skip", entry: i, name: e.name, lines: [`${label(e.kind, e.name)} was recreated by an earlier run (${resumeId}).`] });
+        return;
+      }
+      if (!(e.kind === "emoji" ? e.image : e.file)) {
+        recreateEmojis.push({ type: "skip", entry: i, name: e.name, lines: [`The ${what} of ${label(e.kind, e.name)} could not be saved when it was deleted, so it cannot be recreated.`] });
+        return;
+      }
+      const clash = listOf(e.kind).find((x) => x.name.toLowerCase() === e.name.toLowerCase());
+      if (clash) {
+        recreateEmojis.push({
+          type: "skip",
+          entry: i,
+          name: e.name,
+          lines: [
+            `${e.kind === "emoji" ? `An emoji named :${e.name}:` : `A ${e.kind} named ${quoted(e.name)}`} exists again ` +
+              `(${clash.id.startsWith("pending-") ? "recreated by an undo above" : clash.id}), so it is not recreated.`,
+          ],
+        });
+        return;
+      }
+      recreateEmojis.push({
+        type: "recreate",
+        entry: i,
+        kind: e.kind,
+        name: e.name,
+        lines: [
+          `Recreate ${label(e.kind, e.name)} from its saved ${what}.`,
+          e.kind === "sound"
+            ? "It gets a new id."
+            : "It gets a new id, so messages that used the old one still show it as missing.",
+          ...(e.notes ?? []),
+        ],
+      });
+      return;
+    }
     if (e.kind === "role") {
       if (resumeId && roleById.has(resumeId)) {
         recreateRoles.push({
@@ -430,7 +489,9 @@ export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
     ...recreateRoles,
     ...recreateCategories,
     ...recreateChannels,
+    ...recreateEmojis,
     ...restores.reverse(),
+    ...deleteEmojis,
     ...deleteChannels,
     ...deleteCategories,
     ...deleteRoles,
@@ -643,7 +704,52 @@ export async function executeUndo(
         }
         if (restored) notes.push(`Its permission settings in ${restored} channel(s) are back.`);
         finish(action.entry, "done", e.name, [`${resumed ? "Finished restoring" : "Recreated"} the role ${quoted(e.name)} (${created.id}).`, ...notes], created.id);
-      } else if (action.type === "recreate" && e.op === "deleted" && e.kind !== "role") {
+      } else if (action.type === "recreate" && e.op === "deleted" && e.kind === "emoji") {
+        // Roles it was limited to, where they (or what replaced them) exist.
+        const roles = e.roles.map(mapId).filter((id) => existingRoles.has(id));
+        const created = (await rest.post(Routes.guildEmojis(guildId), {
+          body: { name: e.name, image: e.image, ...(roles.length > 0 ? { roles } : {}) },
+          reason,
+        })) as { id: string; name?: string };
+        setAlias(e.id, created.id);
+        live.emojis = [...(live.emojis ?? []), { id: created.id, name: created.name ?? e.name }];
+        const lost = e.roles.length - roles.length;
+        finish(
+          action.entry,
+          "done",
+          e.name,
+          [
+            `Recreated ${label("emoji", e.name)} (${created.id}).`,
+            ...(lost > 0 ? [`${lost} of the roles it was limited to no longer exist, so it is not limited to them.`] : []),
+          ],
+          created.id
+        );
+      } else if (action.type === "recreate" && e.op === "deleted" && e.kind === "sticker") {
+        const [head, b64] = (e.file as string).split(",");
+        const contentType = head.slice(5).split(";")[0];
+        const created = (await rest.post(Routes.guildStickers(guildId), {
+          appendToFormData: true,
+          body: { name: e.name, description: e.description, tags: e.tags },
+          files: [{ key: "file", name: `sticker.${contentType === "image/gif" ? "gif" : "png"}`, contentType, data: Buffer.from(b64, "base64") }],
+          reason,
+        })) as { id: string; name?: string };
+        setAlias(e.id, created.id);
+        live.stickers = [...(live.stickers ?? []), { id: created.id, name: created.name ?? e.name }];
+        finish(action.entry, "done", e.name, [`Recreated ${label("sticker", e.name)} (${created.id}).`], created.id);
+      } else if (action.type === "recreate" && e.op === "deleted" && e.kind === "sound") {
+        const created = (await rest.post(Routes.guildSoundboardSounds(guildId), {
+          body: {
+            name: e.name,
+            sound: e.file,
+            ...(e.volume !== null ? { volume: e.volume } : {}),
+            ...(e.emojiId ? { emoji_id: e.emojiId } : e.emojiName ? { emoji_name: e.emojiName } : {}),
+          },
+          reason,
+        })) as { sound_id: string; name?: string };
+        setAlias(e.id, created.sound_id);
+        live.sounds = [...(live.sounds ?? []), { id: created.sound_id, name: created.name ?? e.name }];
+        finish(action.entry, "done", e.name, [`Recreated ${label("sound", e.name)} (${created.sound_id}).`], created.sound_id);
+      } else if (action.type === "recreate" && e.op === "deleted" && (e.kind === "channel" || e.kind === "category")) {
         const s = e.snapshot;
         const body: Record<string, unknown> = {};
         for (const k of CHANNEL_FIELDS) if (s[k] !== undefined && s[k] !== null) body[k] = s[k];
@@ -780,14 +886,26 @@ export async function executeUndo(
         const deletedType = entryChannelType(e) ?? existingChannels.get(action.id)?.type;
         try {
           await rest.delete(
-            action.kind === "role" ? Routes.guildRole(guildId, action.id) : Routes.channel(action.id),
+            action.kind === "role"
+              ? Routes.guildRole(guildId, action.id)
+              : action.kind === "emoji"
+                ? Routes.guildEmoji(guildId, action.id)
+                : action.kind === "sticker"
+                  ? Routes.guildSticker(guildId, action.id)
+                  : action.kind === "sound"
+                    ? Routes.guildSoundboardSound(guildId, action.id)
+                    : Routes.channel(action.id),
             { reason }
           );
         } catch (err) {
+          // Already gone: unknown channel, role, emoji, sticker, or sound.
           const code = (err as { code?: number }).code;
-          if (code !== 10003 && code !== 10011) throw err;
+          if (code !== 10003 && code !== 10011 && code !== 10014 && code !== 10060 && code !== 10097) throw err;
         }
         if (action.kind === "role") dropRole(action.id);
+        else if (action.kind === "emoji") live.emojis = (live.emojis ?? []).filter((x) => x.id !== action.id);
+        else if (action.kind === "sticker") live.stickers = (live.stickers ?? []).filter((x) => x.id !== action.id);
+        else if (action.kind === "sound") live.sounds = (live.sounds ?? []).filter((x) => x.id !== action.id);
         else dropChannel(action.id);
         finish(action.entry, "done", action.name, [`Deleted ${label(action.kind, action.name, deletedType)}.`]);
       }
@@ -822,7 +940,9 @@ export async function executeUndo(
 export async function planInOrder(
   guildId: string,
   records: BuildRecord[],
-  live: UndoLive
+  live: UndoLive,
+  // Entries to keep to, by index, when only part of one change is undone.
+  only?: Set<number>
 ): Promise<Array<{ record: BuildRecord; actions: UndoAction[] }>> {
   const view = structuredClone(live);
   let next = 0;
@@ -846,7 +966,7 @@ export async function planInOrder(
   const out: Array<{ record: BuildRecord; actions: UndoAction[] }> = [];
   for (const record of records) {
     const copy = structuredClone(record);
-    const actions = planUndo(copy, view);
+    const actions = planUndo(copy, view).filter((a) => !only || only.has(a.entry));
     out.push({ record, actions });
     await executeUndo(standIn, guildId, copy, actions, view, () => {});
   }

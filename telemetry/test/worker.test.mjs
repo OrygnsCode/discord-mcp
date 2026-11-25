@@ -75,6 +75,32 @@ const count = async (day, metric, key = "") =>
 const logRows = async () => (await db.prepare("SELECT COUNT(*) AS c FROM log").first()).c;
 
 try {
+  // Every kind of error and confirmation event the client can count is one
+  // the receiver keeps.
+  const { ERROR_CLASSES, GATE_EVENTS } = await import("../../dist/usageStats.js");
+  const d9 = daysAgo(9);
+  await send("/discord-mcp/v1/ping", report({ days: [{ d: d9, tools: { list_roles: "1-9" }, gate: Object.fromEntries(GATE_EVENTS.map((g) => [g, "1-9"])), errors: Object.fromEntries(ERROR_CLASSES.map((c) => [c, "1-9"])), apps: ["claude-code"] }] }));
+  const lostClasses = [];
+  for (const c of ERROR_CLASSES) if ((await count(d9, "error", `${c}|1-9`)) !== 1) lostClasses.push(c);
+  check(lostClasses.length === 0 && ERROR_CLASSES.length === 14, `the receiver keeps every kind of error the client counts (${ERROR_CLASSES.length}; not kept: ${lostClasses.join(", ") || "none"})`);
+  const lostGate = [];
+  for (const g of GATE_EVENTS) if ((await count(d9, "gate", `${g}|1-9`)) !== 1) lostGate.push(g);
+  check(lostGate.length === 0 && GATE_EVENTS.includes("expired"), `and every confirmation event (${GATE_EVENTS.join(", ")}; not kept: ${lostGate.join(", ") || "none"})`);
+  const d10 = daysAgo(10);
+  await send("/discord-mcp/v1/ping", report({ days: [{ d: d10, tools: { create_emoji: "10-99", update_role: "1-9" }, failed: { create_emoji: "10-99", "Not A Tool!": "1-9", update_role: "999" }, gate: {}, errors: { file: "10-99" }, apps: ["claude-code"] }] }));
+  check((await count(d10, "tool_failed", "create_emoji|10-99")) === 1 && (await count(d10, "tool_failed", "update_role|999")) === 0 && (await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE metric = 'tool_failed' AND key LIKE 'Not%'").first()).c === 0, "failed calls are kept per tool, by the same rules as tool counts");
+  // A container run without saved state is first of everything every time:
+  // it is counted apart, not as a new install.
+  await send("/discord-mcp/v1/ping", report({ ctx: "container", first: { week: true, month: true, ever: true } }));
+  await send("/discord-mcp/v1/ping", report({ ctx: "default", first: { week: true, month: true, ever: true } }));
+  check((await count(today, "first_ever", "")) === 1 && (await count(today, "first_ever", "container")) === 1 && (await count(today, "first_month", "container")) === 1, "a container run that looks new is counted apart from new installs");
+  const statsRes = await mf.dispatchFetch("http://localhost/discord-mcp/v1/stats?days=2", { headers: { authorization: "Bearer test-stats-token" } });
+  const statsBody = await statsRes.json();
+  check(statsBody.perDay[today]?.first_ever === 1 && statsBody.totals.first_ever?.container === 1, `and the stats keep it out of the daily new-install count (${JSON.stringify(statsBody.perDay[today])})`);
+  await db.prepare("DELETE FROM daily").run();
+  await db.prepare("DELETE FROM log").run();
+  await db.prepare("DELETE FROM nonces").run();
+
   // A good report.
   const first = report();
   let res = await send("/discord-mcp/v1/ping", first);

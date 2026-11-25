@@ -5,6 +5,59 @@ The format follows Keep a Changelog, and the project follows semantic
 versioning. Version 1.0.0 marked the public launch; releases since follow
 semver.
 
+## 2.2.0 (2026-11-25)
+
+### Added
+
+- Images and sounds can come from a folder on your computer. Set
+  DISCORD_MCP_FILES_DIR (or Files folder in Claude Desktop) and the AI can
+  upload from it by file name: emoji, stickers, sounds, role icons, and the
+  server's and the bot's pictures. Nothing outside that folder is read, and
+  a file only counts if it really is an image or a sound.
+- Images that are too big for an emoji or sticker get scaled down instead of
+  refused. Still png and jpeg only; animated ones are left alone.
+- delete_emoji takes a list, so clearing out old emoji is one preview and
+  one confirm instead of two calls each.
+- create_emoji uploads many at once. It checks every picture and the free
+  slots first, and uploads nothing unless all of them fit.
+- Deleted emoji, stickers, and sounds can be brought back with undo_change;
+  the file is saved just before the delete. New ones can be undone too.
+- run_setup_check says where the files folder is and what's in it, or warns
+  when it isn't there.
+- undo_change can undo part of a change, like one of several deleted
+  emoji; the rest stays there to undo later.
+- Uploads check for a free slot first and say when the server is full,
+  instead of failing at Discord. Near Discord's hourly emoji upload cap,
+  create_emoji warns.
+- get_server_overview shows the emoji, sticker, and sound slots in use and
+  what the boost level doesn't unlock yet.
+- delete_sticker and delete_soundboard_sound take lists too, and
+  update_emoji renames many at once.
+- update_role works on @everyone, for its permissions. Every change to it is
+  previewed first, since it hits every member.
+
+### Fixed
+
+- Role previews no longer hang for up to two minutes. Discord only allows a
+  few member counts every couple of minutes; past that the count is skipped
+  instead of waited for.
+- Setting a role's permissions by name no longer drops a permission Discord
+  has that we don't have a name for yet.
+- A confirm token used too late says it expired, instead of "unknown".
+- Images served as plain downloads (octet-stream) are recognized.
+- Short hex colors like #0ff work.
+
+### Changed
+
+- list_roles marks the roles the bot can't change and why, and says which
+  role styles (gradients, icons) the server can't have.
+- Clearer errors for duplicate names, roles above the bot, dead image links,
+  and a member list refused because the Server Members intent is off.
+- create_emoji warns when the name is already taken.
+- Usage stats sort errors into a few more kinds and count failed calls per
+  tool. A dry run that's refused no longer counts as a failure, since it's
+  just the AI checking what's possible. [What's in it](https://github.com/OrygnsCode/discord-mcp/blob/main/docs/privacy.md)
+
 ## 2.1.1 (2026-11-20)
 
 ### Fixed

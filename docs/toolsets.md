@@ -3,7 +3,7 @@
 discord-mcp ships 164 tools. Every one of them is described to your AI client
 before you type anything, which costs context on every request and gives the
 model more options to choose between than most sessions need. The full set is
-about 188 KB of JSON, roughly 47,000 tokens.
+about 192 KB of JSON, roughly 48,000 tokens.
 
 `DISCORD_MCP_TOOLS` narrows that to the groups you actually use.
 
@@ -47,15 +47,15 @@ selected, minus the payload of `core` alone.
 
 | Group | Tools | Size | What it covers |
 |---|---|---|---|
-| `core` | 15 | 11.6 KB | Always on. Diagnostics, setup check, server and channel and role listings, message and member search, `find`, `catch_up`. |
+| `core` | 15 | 11.7 KB | Always on. Diagnostics, setup check, server and channel and role listings, message and member search, `find`, `catch_up`. |
 | `messaging` | 21 | 29.4 KB | Sending (with files), editing, replies, DMs, reactions, polls, pins, scheduled messages. |
 | `moderation` | 17 | 17.9 KB | Bans, kicks, timeouts, prune, the audit log, raid actions, AutoMod rules. |
-| `structure` | 28 | 33.1 KB | Channels, roles, and permission overwrites, including locking and cloning, undoing any recorded change, and the security review with its who-can-reach views. |
+| `structure` | 28 | 33.9 KB | Channels, roles, and permission overwrites, including locking and cloning, undoing any recorded change, and the security review with its who-can-reach views. |
 | `builder` | 11 | 31.0 KB | Planning a server from a brief or a template link, editing an existing one, executing plans, blueprints and diffs. |
 | `threads` | 8 | 5.6 KB | Threads and their members. |
 | `forums` | 8 | 8.1 KB | Forum posts, replies, and tags. |
-| `community` | 31 | 24.0 KB | Invites, webhooks, events, stages, emojis, stickers, soundboard. |
-| `server` | 21 | 20.7 KB | Server settings, widget, welcome screen, onboarding, templates, the bot's presence and profile, leaving a server, slash commands. |
+| `community` | 31 | 26.3 KB | Invites, webhooks, events, stages, emojis, stickers, soundboard. |
+| `server` | 21 | 21.3 KB | Server settings, widget, welcome screen, onboarding, templates, the bot's presence and profile, leaving a server, slash commands. |
 | `realtime` | 4 | 2.6 KB | Live gateway event subscriptions. |
 
 ## What it saves
@@ -65,14 +65,14 @@ bytes each:
 
 | Setting | Tools | Payload | Tokens | Saved |
 |---|---|---|---|---|
-| unset (everything) | 164 | 188,445 B | ~47,100 | |
-| `core` only | 15 | 11,858 B | ~3,000 | 94% |
-| `messaging` | 36 | 41,927 B | ~10,500 | 78% |
-| `builder` | 26 | 43,603 B | ~10,900 | 77% |
-| `messaging,moderation` | 53 | 60,276 B | ~15,100 | 68% |
-| `messaging,moderation,structure` | 81 | 94,160 B | ~23,500 | 50% |
-| `DISCORD_MCP_READ_ONLY=true` | 60 | 48,872 B | ~12,200 | 74% |
-| read-only with `messaging,moderation` | 24 | 18,002 B | ~4,500 | 90% |
+| unset (everything) | 164 | 192,436 B | ~48,100 | |
+| `core` only | 15 | 11,992 B | ~3,000 | 94% |
+| `messaging` | 36 | 42,067 B | ~10,500 | 78% |
+| `builder` | 26 | 43,737 B | ~10,900 | 77% |
+| `messaging,moderation` | 53 | 60,416 B | ~15,100 | 69% |
+| `messaging,moderation,structure` | 81 | 95,148 B | ~23,800 | 51% |
+| `DISCORD_MCP_READ_ONLY=true` | 60 | 49,006 B | ~12,300 | 75% |
+| read-only with `messaging,moderation` | 24 | 18,136 B | ~4,500 | 91% |
 
 ## Choosing a set
 
@@ -100,7 +100,7 @@ In stdio mode the startup line on stderr also names the active groups, so you
 can confirm what a session loaded:
 
 ```
-discord-mcp v2.1.1 on stdio (toolsets: core, messaging, moderation)
+discord-mcp v2.2.0 on stdio (toolsets: core, messaging, moderation)
 ```
 
 ## Adding a tool

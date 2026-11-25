@@ -31,13 +31,16 @@ const SNOWFLAKE = /^\d{17,20}$/;
 // An undo that has held its lock this long is assumed dead.
 const LOCK_STALE_MS = 10 * 60_000;
 
-export type ItemKind = "role" | "category" | "channel" | "server";
+export type ItemKind = "role" | "category" | "channel" | "server" | "emoji" | "sticker" | "sound";
 
 // How a recorded item is named in a sentence: "#general", "the voice
 // channel Lobby", "the category Staff", "the role Mod".
 export function itemLabel(kind: ItemKind, name: string, channelType?: number): string {
   if (kind === "server") return "the server settings";
   if (kind === "role") return `the role ${quoted(name)}`;
+  if (kind === "emoji") return `the emoji :${plainText(name)}:`;
+  if (kind === "sticker") return `the sticker ${quoted(name)}`;
+  if (kind === "sound") return `the sound ${quoted(name)}`;
   if (kind === "category" || channelType === 4) return `the category ${quoted(name)}`;
   if (channelType === 2) return `the voice channel ${quoted(name)}`;
   if (channelType === 13) return `the stage channel ${quoted(name)}`;
@@ -106,6 +109,47 @@ export type RecordEntry =
       memberCount: number | null;
       // Its overwrites on channels this build did not delete.
       overwrites: Array<{ channel_id: string; allow: string; deny: string }>;
+      notes?: string[];
+      undo?: EntryUndo;
+    }
+  | {
+      op: "deleted";
+      kind: "emoji";
+      id: string;
+      name: string;
+      animated: boolean;
+      // The roles it was limited to, if any.
+      roles: string[];
+      // Its picture as a data URI, saved just before deletion, since Discord
+      // keeps nothing of a deleted emoji. Null when it could not be saved.
+      image: string | null;
+      notes?: string[];
+      undo?: EntryUndo;
+    }
+  | {
+      op: "deleted";
+      kind: "sticker";
+      id: string;
+      name: string;
+      description: string;
+      tags: string;
+      // Its image as a data URI, saved just before deletion; null when it
+      // could not be saved.
+      file: string | null;
+      notes?: string[];
+      undo?: EntryUndo;
+    }
+  | {
+      op: "deleted";
+      kind: "sound";
+      id: string;
+      name: string;
+      volume: number | null;
+      emojiId: string | null;
+      emojiName: string | null;
+      // The sound as a data URI, saved just before deletion; null when it
+      // could not be saved.
+      file: string | null;
       notes?: string[];
       undo?: EntryUndo;
     };
@@ -238,6 +282,6 @@ export function writeRecord(record: BuildRecord): void {
 // A recorded channel's Discord type, where the record has it.
 export function entryChannelType(e: RecordEntry): number | undefined {
   if (e.op === "created" || e.op === "updated") return e.channelType;
-  if (e.op === "deleted" && e.kind !== "role" && e.snapshot.type !== undefined) return Number(e.snapshot.type);
+  if (e.op === "deleted" && (e.kind === "channel" || e.kind === "category") && e.snapshot.type !== undefined) return Number(e.snapshot.type);
   return undefined;
 }

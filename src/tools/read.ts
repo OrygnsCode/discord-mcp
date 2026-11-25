@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { channelLabel } from "../discord/grants.js";
+import { channelLabel, joinWords } from "../discord/grants.js";
 import { quoted } from "../discord/names.js";
 import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type {
@@ -12,12 +12,14 @@ import type {
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { ServerConfig } from "../config.js";
 import {
+  getBotUser,
   getChannels,
   getRoles,
   CHANNEL_TYPE_LABELS,
 } from "../discord/guildData.js";
-import { rankCandidates, resolveOne, type Resolvable } from "../discord/resolve.js";
+import { rankCandidates, resolveOne, type Resolvable, noSingleMatch } from "../discord/resolve.js";
 import { compareRolesLowToHigh } from "../discord/preflight.js";
+import { boostUnlocks, emojiSlots, missingUnlocks, soundSlots, stickerSlots } from "../discord/limits.js";
 import { ok, fail } from "../envelope.js";
 import {
   enter,
@@ -75,18 +77,36 @@ export function registerReadTools(
         "status, channel outline grouped by category, and role count. The " +
         "natural first call when starting work on a server. The outline holds " +
         "only channels the bot can see; hidden_from_bot says how many others " +
-        "exist when any do. A running pause on invites or DMs is reported too.",
+        "exist when any do. A running pause on invites or DMs is reported too, " +
+        "and so are the emoji, sticker, and sound slots in use and what the " +
+        "boost level does not unlock yet (a banner, role icons, and so on).",
       inputSchema: { guild: guildParam },
       annotations: { readOnlyHint: true },
     },
     guarded(async ({ guild }) => {
       const { rest, guildId } = await enter(config, guild);
-      const [guildData, channels] = await Promise.all([
+      const [guildData, channels, sounds] = await Promise.all([
         rest.get(Routes.guild(guildId), {
           query: new URLSearchParams({ with_counts: "true" }),
         }) as Promise<APIGuild>,
         getChannels(rest, guildId),
+        (rest.get(Routes.guildSoundboardSounds(guildId)) as Promise<{ items: unknown[] }>).catch(() => undefined),
       ]);
+      // What the boost level allows and what is used of it, so work that
+      // uploads or restyles knows the room it has before it starts.
+      const features = guildData.features as string[];
+      const emojiLimit = emojiSlots(guildData.premium_tier, features);
+      const stickerLimit = stickerSlots(guildData.premium_tier, features);
+      const soundLimit = soundSlots(guildData.premium_tier, features);
+      const animatedEmoji = guildData.emojis.filter((e) => e.animated).length;
+      const slots = {
+        emoji_static: { used: guildData.emojis.length - animatedEmoji, limit: emojiLimit },
+        emoji_animated: { used: animatedEmoji, limit: emojiLimit },
+        stickers: { used: guildData.stickers?.length ?? 0, limit: stickerLimit },
+        ...(sounds ? { sounds: { used: sounds.items.length, limit: soundLimit } } : {}),
+      };
+      const of = (x: { used: number; limit: number | null }) => (x.limit === null ? `${x.used}` : `${x.used} of ${x.limit}`);
+      const missing = missingUnlocks(features, true);
 
       const byType: Record<string, number> = {};
       for (const c of channels) {
@@ -139,6 +159,9 @@ export function registerReadTools(
         `${quoted(guildData.name)}: ${members} members (${online} online), ` +
           `${channels.length} channels in ${categories.length} categories, ` +
           `${guildData.roles.length} roles, boost tier ${guildData.premium_tier}.` +
+          ` Slots used: ${of(slots.emoji_static)} static emoji, ${of(slots.emoji_animated)} animated, ${of(slots.stickers)} stickers` +
+          (slots.sounds ? `, ${of(slots.sounds)} sounds.` : ".") +
+          (missing.length > 0 ? ` Not unlocked at this boost level: ${joinWords(missing)}.` : "") +
           (hidden.count ? ` ${hidden.count} more channel(s) are hidden from the bot.` : "") +
           (paused.length ? ` Right now ${paused.join(" and ")}; set_incident_actions changes that.` : ""),
         {
@@ -156,6 +179,8 @@ export function registerReadTools(
           uncategorized,
           role_count: guildData.roles.length,
           emoji_count: guildData.emojis.length,
+          slots,
+          unlocked: boostUnlocks(features),
           features: guildData.features.slice(0, 10),
           ...(hidden.count === 0 ? {} : { hidden_from_bot: hidden }),
           ...(paused.length > 0 || flagged
@@ -246,12 +271,43 @@ export function registerReadTools(
     },
     guarded(async ({ guild }) => {
       const { rest, guildId } = await enter(config, guild);
-      const [roles, counts] = await Promise.all([
+      const [roles, counts, botRoleIds, features] = await Promise.all([
         getRoles(rest, guildId),
         // Discord's own per-role counts (added December 2025). It leaves out
         // @everyone and roles nobody holds.
         (rest.get(Routes.guildRoleMemberCounts(guildId)) as Promise<Record<string, number>>).catch(() => undefined),
+        getBotUser(rest)
+          .then((bot) => rest.get(Routes.guildMember(guildId, bot.id)) as Promise<APIGuildMember>)
+          .then((m) => m.roles)
+          .catch(() => undefined),
+        (rest.get(Routes.guild(guildId)) as Promise<APIGuild>).then((g) => g.features as string[]).catch(() => undefined),
       ]);
+      // Which styles roles can have here, said before any restyling: an AI
+      // asked for a themed look otherwise tries gradients and icons on every
+      // role and learns from each refusal (seen live, eight refusals in one
+      // overhaul). The same features update_role checks.
+      const styles = features
+        ? { gradient_colors: features.includes("ENHANCED_ROLE_COLORS"), holographic: features.includes("ENHANCED_ROLE_COLORS"), icons: features.includes("ROLE_ICONS") }
+        : undefined;
+      const missing = styles
+        ? [
+            ...(!styles.gradient_colors ? ["gradient or holographic colors (they need the Enhanced Role Colors feature)"] : []),
+            ...(!styles.icons ? ["icons (they need boost level 2)"] : []),
+          ]
+        : [];
+      // Which roles the bot cannot change, said up front, so an AI restyling
+      // every role does not learn it one refusal at a time: Discord lets a
+      // bot change only roles below its own highest one, and nobody changes
+      // a role an integration manages.
+      const botTop = botRoleIds
+        ? roles.filter((r) => botRoleIds.includes(r.id)).sort((a, b) => compareRolesLowToHigh(b, a))[0]
+        : undefined;
+      const blocked = (r: (typeof roles)[number]): string | undefined => {
+        if (r.id === guildId) return undefined;
+        if (r.managed) return "managed by an integration";
+        if (botRoleIds && (!botTop || compareRolesLowToHigh(r, botTop) >= 0)) return "not below the bot's highest role";
+        return undefined;
+      };
       const hex = (n: number | null | undefined) => (n ? `#${n.toString(16).padStart(6, "0")}` : null);
       const listed = [...roles]
         .sort((a, b) => compareRolesLowToHigh(b, a))
@@ -259,6 +315,8 @@ export function registerReadTools(
           id: r.id,
           name: r.name,
           position: r.position,
+          ...(blocked(r) ? { bot_cannot_change: blocked(r) } : {}),
+          ...(botRoleIds?.includes(r.id) ? { bot_has: true } : {}),
           ...(counts && r.id !== guildId ? { members: counts[r.id] ?? 0 } : {}),
           color: hex(r.color),
           ...(r.colors?.tertiary_color
@@ -272,9 +330,15 @@ export function registerReadTools(
           managed: r.managed,
           key_permissions: permissionDigest(r.permissions),
         }));
+      const cannot = listed.filter((r) => "bot_cannot_change" in r && r.id !== guildId).length;
       return ok(
-        `${listed.length} role(s), listed highest first.`,
-        { roles: listed },
+        `${listed.length} role(s), listed highest first.` +
+          (botRoleIds === undefined || cannot === 0
+            ? ""
+            : ` The bot cannot change ${cannot} of them (marked bot_cannot_change)` +
+              (botTop ? `; it can change only roles below its highest role, ${quoted(botTop.name)}.` : "; it has no role here.")) +
+          (missing.length > 0 ? ` Roles here cannot have ${joinWords(missing)}; a solid color works.` : ""),
+        { roles: listed, ...(styles ? { role_styles: styles } : {}) },
         counts ? [] : ["Member counts per role were not available."]
       );
     })
@@ -518,7 +582,7 @@ export function registerReadTools(
           roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
         );
         if (!("match" in resolution)) {
-          return fail(`No single role matches "${role}".`, {
+          return fail(noSingleMatch("role", "roles", role, resolution), {
             candidates: "candidates" in resolution ? resolution.candidates : [],
           });
         }

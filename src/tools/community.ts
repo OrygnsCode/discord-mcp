@@ -3,6 +3,7 @@ import { Routes, PermissionFlagsBits } from "discord-api-types/v10";
 import type {
   APIRole,
   APIEmoji,
+  APIGuild,
   APIExtendedInvite,
   APIInvite,
   APIMessage,
@@ -10,16 +11,25 @@ import type {
   RESTPostAPIChannelInviteJSONBody,
   RESTPostAPIWebhookWithTokenJSONBody,
 } from "discord-api-types/v10";
-import type { REST } from "@discordjs/rest";
+import { DiscordAPIError, type REST } from "@discordjs/rest";
+import type { CallToolResult, InputRequiredResult } from "@modelcontextprotocol/server";
+import { describeRateLimit } from "../discord/client.js";
+import { recordChange, undoNote, changeData } from "./changes.js";
+import { emojiSlots, isAnimatedImage, noteEmojiUpload } from "../discord/limits.js";
+import type { RecordEntry } from "../builder/records.js";
 import type { McpServer } from "@modelcontextprotocol/server";
 import type { ServerConfig } from "../config.js";
 import { getBotUser, getChannels, getGuildList } from "../discord/guildData.js";
 import { channelLabel, grantLines, grantPhrase, grantsForGivingRoles, grantsKey, hasGrants, joinWords, type Scene } from "../discord/grants.js";
 import { ALL_PERMISSIONS } from "../discord/preflight.js";
 import { CONFIRM_STEPS, POWER_EXAMPLES, loadScene } from "./grantGate.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import {
   fetchImageAsDataUri,
+  loadAsset,
+  toDataUri,
+  captureEmoji,
+  IMAGE_TYPES,
   MAX_EMOJI_BYTES,
   MAX_AVATAR_BYTES,
 } from "../discord/images.js";
@@ -751,18 +761,47 @@ export function registerCommunityTools(
     {
       title: "Create emoji",
       description:
-        "Upload a custom emoji from an image URL. Discord's limit for " +
-        "emoji files is 256 KB; png, jpeg, gif, and webp work.",
+        "Upload a custom emoji from an image URL, or from a file in the " +
+        "local files folder when one is set, or several at once with emojis. " +
+        "Discord's limit for emoji files is 256 KB; png, jpeg, gif, and webp " +
+        "work, and a still png or jpeg over the limit is made smaller (128 " +
+        "pixels on its longer side). Several are all checked first (pictures, " +
+        "free slots) and nothing is uploaded unless all of them can be.",
       inputSchema: {
         guild: guildParam,
         name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/,
-          "Letters, digits, and underscores only."),
-        image_url: z.string().url(),
+          "Letters, digits, and underscores only.").optional(),
+        image_url: z.string().url().optional()
+          .describe("Public http or https link to the image file itself."),
+        image_file: z.string().min(1).optional()
+          .describe("An image file in the local files folder (DISCORD_MCP_FILES_DIR), by name, instead of a link. Only that folder is read, and only when it is set."),
+        emojis: z
+          .array(
+            z.object({
+              name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/, "Letters, digits, and underscores only."),
+              image_url: z.string().url().optional(),
+              image_file: z.string().min(1).optional(),
+            })
+          )
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Several emoji to upload together, each with a name and an image_url or image_file, instead of name and one image."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ guild, name, image_url }) => {
+    guarded(async ({ guild, name, image_url, image_file, emojis: many }) => {
       const { rest, guildId } = await enter(config, guild);
+      if (many !== undefined) {
+        if (name !== undefined || image_url !== undefined || image_file !== undefined) {
+          return fail("Pass emojis for several, or name with image_url or image_file for one, not both.");
+        }
+        return createSeveralEmoji(rest, guildId, many);
+      }
+      if (name === undefined) return fail("Pass name, with image_url or image_file, or emojis for several.");
+      if ((image_url === undefined) === (image_file === undefined)) {
+        return fail("Pass image_url or image_file, one of them.");
+      }
 
       const perms = await botPermissions(rest, guildId);
       requirePermissions(
@@ -771,17 +810,68 @@ export function registerCommunityTools(
         "in this server"
       );
 
-      const image = await fetchImageAsDataUri(image_url, MAX_EMOJI_BYTES);
+      const image = await loadAsset({ url: image_url, file: image_file }, MAX_EMOJI_BYTES, IMAGE_TYPES, "image", 128);
       if (!image.ok) return fail(image.error);
 
+      const [existing, server] = await Promise.all([
+        (rest.get(Routes.guildEmojis(guildId)) as Promise<APIEmoji[]>).catch(() => undefined),
+        (rest.get(Routes.guild(guildId)) as Promise<APIGuild>).catch(() => undefined),
+      ]);
+      // A full server is said before anything is sent. Static and animated
+      // emoji have separate slots, and which this one takes depends on its
+      // picture.
+      const animated = isAnimatedImage(image.contentType, image.data);
+      const kind = animated ? "animated" : "static";
+      const limit = server ? emojiSlots(server.premium_tier, server.features as string[]) : null;
+      const used = existing ? existing.filter((e) => Boolean(e.animated) === animated).length : undefined;
+      if (limit !== null && used !== undefined && used >= limit) {
+        return fail(
+          `All ${limit} ${kind} emoji slots are in use (boost level ${server?.premium_tier ?? 0}), so nothing was uploaded. ` +
+            "Delete one first, or boost the server for more.",
+          { slots: { kind, used, limit } }
+        );
+      }
+      // Discord takes a name that is already in use, and after that the
+      // name alone no longer picks one emoji, so that is said now.
+      const sameName = (existing ?? []).filter((e) => e.name?.toLowerCase() === name.toLowerCase()).length;
+
       const emoji = (await rest.post(Routes.guildEmojis(guildId), {
-        body: { name, image: image.dataUri },
+        body: { name, image: toDataUri(image.contentType, image.data) },
         reason: "Created via discord-mcp",
       })) as APIEmoji;
+      const uploadsThisHour = noteEmojiUpload(guildId);
+      const left = limit !== null && used !== undefined ? limit - used - 1 : undefined;
 
+      const recorded = await recordChange(rest, guildId, "create_emoji", [
+        { op: "created", kind: "emoji", id: emoji.id as string, name: emoji.name ?? name },
+      ]);
       return ok(
-        `Created the emoji :${emoji.name}: . Use it as <:${emoji.name}:${emoji.id}>.`,
-        { id: emoji.id, name: emoji.name }
+        `Created the emoji :${emoji.name}: . Use it as <:${emoji.name}:${emoji.id}>.` + undoNote(recorded),
+        {
+          id: emoji.id,
+          name: emoji.name,
+          ...(left !== undefined ? { slots: { kind, used: (used as number) + 1, limit } } : {}),
+          ...changeData(recorded),
+        },
+        [
+          ...(recorded.warning ? [recorded.warning] : []),
+          ...(image.note ? [image.note] : []),
+          ...(left !== undefined && left <= 3
+            ? [left === 0 ? `That was the last free ${kind} emoji slot.` : `Only ${left} ${kind} emoji slot${left === 1 ? "" : "s"} left.`]
+            : []),
+          ...(uploadsThisHour >= 40
+            ? [
+                `That is ${uploadsThisHour} emoji uploaded to this server through this install in the last hour; ` +
+                  "Discord stops emoji uploads to a server for about an hour after roughly 50.",
+              ]
+            : []),
+          ...(sameName > 0
+            ? [
+                `${sameName === 1 ? "Another emoji already had" : `${sameName} other emoji already had`} this name, so the name alone ` +
+                  `no longer picks one: use the ID (${emoji.id}) to rename or delete this one.`,
+              ]
+            : []),
+        ]
       );
     })
   );
@@ -790,17 +880,34 @@ export function registerCommunityTools(
     "update_emoji",
     {
       title: "Update emoji",
-      description: "Rename a custom emoji.",
+      description: "Rename a custom emoji, or several at once with renames.",
       inputSchema: {
-        emoji: z.string().describe("Current emoji name or ID."),
+        emoji: z.string().optional().describe("Current emoji name or ID."),
         guild: guildParam,
-        name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/),
+        name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/).optional(),
+        renames: z
+          .array(
+            z.object({
+              emoji: z.string().describe("Current emoji name or ID."),
+              name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/),
+            })
+          )
+          .min(1)
+          .max(250)
+          .optional()
+          .describe("Several renames at once, instead of emoji and name."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ emoji, guild, name }) => {
+    guarded(async ({ emoji, guild, name, renames }) => {
       const { rest, guildId } = await enter(config, guild);
+      if (renames !== undefined ? emoji !== undefined || name !== undefined : emoji === undefined || name === undefined) {
+        return fail("Pass emoji and name for one rename, or renames for several, not both.");
+      }
       const emojis = (await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[];
+      if (renames !== undefined) return renameSeveralEmoji(rest, guildId, emojis, renames);
+      emoji = emoji as string;
+      name = name as string;
       const resolution = resolveOne(
         emoji,
         emojis
@@ -808,7 +915,7 @@ export function registerCommunityTools(
           .map((e) => ({ id: e.id as string, name: e.name as string, type: "emoji" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single emoji matches "${emoji}".`, {
+        return fail(noSingleMatch("emoji", "emoji", emoji, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }
@@ -836,20 +943,33 @@ export function registerCommunityTools(
     {
       title: "Delete emoji",
       description:
-        "Delete a custom emoji. Safe to call directly: the first call " +
-        "changes nothing and returns a preview plus a confirm_token; " +
-        "repeating the call with the token deletes it.",
+        "Delete a custom emoji, or several at once with emojis. Safe to call " +
+        "directly: the first call changes nothing and returns a preview plus " +
+        "a confirm_token; repeating the call with the token deletes them. " +
+        "Several emoji share one preview and one token.",
       inputSchema: {
-        emoji: z.string().describe("Emoji name or ID."),
+        emoji: z.string().optional().describe("Emoji name or ID."),
+        emojis: z.array(z.string()).min(1).max(250).optional()
+          .describe("Several emoji to delete together, by name or ID, instead of emoji."),
         guild: guildParam,
         dry_run: z.boolean().optional(),
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    guarded(async ({ emoji, guild, dry_run, confirm_token }) => {
+    guarded(async ({ emoji, emojis: many, guild, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
+      if ((emoji === undefined) === (many === undefined)) {
+        return fail("Pass emoji for one emoji, or emojis for several, not both and not neither.");
+      }
       const emojis = (await rest.get(Routes.guildEmojis(guildId))) as APIEmoji[];
+      const candidates = emojis
+        .filter((e) => e.id && e.name)
+        .map((e) => ({ id: e.id as string, name: e.name as string, type: "emoji" }));
+      if (many !== undefined) {
+        return deleteManyEmoji(rest, guildId, many, candidates, emojis, dry_run, confirm_token);
+      }
+      emoji = emoji as string;
       const resolution = resolveOne(
         emoji,
         emojis
@@ -857,7 +977,7 @@ export function registerCommunityTools(
           .map((e) => ({ id: e.id as string, name: e.name as string, type: "emoji" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single emoji matches "${emoji}".`, {
+        return fail(noSingleMatch("emoji", "emoji", emoji, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }
@@ -881,13 +1001,281 @@ export function registerCommunityTools(
       });
       if (gate) return gate;
 
-      await rest.delete(Routes.guildEmoji(guildId, resolution.match.id), {
-        reason: "Deleted via discord-mcp",
-      });
-      return ok(`Deleted the emoji :${resolution.match.name}:.`, {
-        deleted: true,
-        id: resolution.match.id,
-      });
+      const target = emojis.find((x) => x.id === resolution.match.id) as APIEmoji;
+      const done = await deleteEmojiList(rest, guildId, [target]);
+      if (done.stopped) return fail(`Discord refused to delete :${resolution.match.name}:: ${done.stopped.why}`);
+      return ok(
+        `Deleted the emoji :${resolution.match.name}:.` + undoNote(done.recorded),
+        { deleted: true, id: resolution.match.id, ...changeData(done.recorded) },
+        done.notes
+      );
     })
   );
+}
+
+// Several emoji deleted under one preview and one confirm_token, as in an
+// emoji overhaul: one by one they took two calls each. Every name has to
+// pick out one emoji before anything is shown. Deletion goes in order and
+// stops at a hold Discord puts on it, saying what was and was not done.
+async function deleteManyEmoji(
+  rest: REST,
+  guildId: string,
+  names: string[],
+  candidates: Array<{ id: string; name: string; type: string }>,
+  all: APIEmoji[],
+  dryRun: boolean | undefined,
+  confirmToken: string | undefined
+): Promise<CallToolResult | InputRequiredResult> {
+  const picked = new Map<string, string>();
+  const problems: string[] = [];
+  for (const query of names) {
+    const resolution = resolveOne(query, candidates);
+    if ("match" in resolution) picked.set(resolution.match.id, resolution.match.name);
+    else problems.push(noSingleMatch("emoji", "emoji", query, resolution));
+  }
+  if (problems.length > 0) {
+    return fail(
+      `Nothing was deleted: ${problems.length} of the ${names.length} names did not pick out one emoji. ${problems.join(" ")}`,
+      { unresolved: problems.length }
+    );
+  }
+
+  const perms = await botPermissions(rest, guildId);
+  requirePermissions(perms, [[P.ManageGuildExpressions, "Manage Expressions"]], "in this server");
+
+  const list = [...picked.entries()].map(([id, name]) => ({ id, name }));
+  const shown = list.map((e) => `:${e.name}:`);
+  const gate = gateDestructive({
+    tool: "delete_emoji",
+    args: { emojis: list.map((e) => e.id).sort() },
+    dryRun,
+    confirmToken,
+    previewSummary:
+      `Would delete ${list.length} emoji: ${shown.slice(0, 50).join(" ")}` +
+      (list.length > 50 ? ` and ${list.length - 50} more` : "") +
+      ". Messages that used them keep a broken reference.",
+    dialogSummary: `Would delete ${list.length} emoji. Messages that used them keep a broken reference.`,
+    dialogLines: shown,
+    previewDetails: { emojis: list },
+  });
+  if (gate) return gate;
+
+  const done = await deleteEmojiList(rest, guildId, list.map((e) => all.find((x) => x.id === e.id) as APIEmoji));
+  if (done.stopped) {
+    const left = list.slice(done.stopped.at).map((x) => `:${x.name}:`);
+    return fail(
+      `Deleted ${done.deleted.length} of ${list.length} emoji, then Discord refused :${list[done.stopped.at].name}:: ${done.stopped.why} ` +
+        `Not deleted: ${left.join(" ")}.` + undoNote(done.recorded),
+      { deleted: done.deleted, already_gone: done.gone, not_deleted: list.slice(done.stopped.at).map((x) => x.id), ...changeData(done.recorded) }
+    );
+  }
+  return ok(
+    `Deleted ${done.deleted.length} emoji` +
+      (done.gone.length > 0 ? `; ${done.gone.length} had already been deleted (${done.gone.map((n) => `:${n}:`).join(" ")})` : "") +
+      "." + undoNote(done.recorded),
+    { deleted: done.deleted.length, already_gone: done.gone.length, ...changeData(done.recorded) },
+    done.notes
+  );
+}
+
+// Pictures saved per change for undo, at most. Emoji are kept at 128
+// pixels, mostly well under 50 KB, so this covers a few hundred.
+const UNDO_IMAGE_BUDGET = 8 * 1024 * 1024;
+
+// Deletes emoji in order, saving each one's picture first (Discord keeps
+// nothing of a deleted emoji), and records what went so undo_change can
+// recreate it. Stops at the first refusal other than "already gone".
+async function deleteEmojiList(
+  rest: REST,
+  guildId: string,
+  list: APIEmoji[]
+): Promise<{
+  deleted: string[];
+  gone: string[];
+  stopped?: { at: number; why: string };
+  recorded: { changeId?: string; warning?: string };
+  notes: string[];
+}> {
+  const deleted: string[] = [];
+  const gone: string[] = [];
+  const entries: RecordEntry[] = [];
+  let budget = UNDO_IMAGE_BUDGET;
+  let unsaved = 0;
+  let stopped: { at: number; why: string } | undefined;
+  for (const [i, e] of list.entries()) {
+    const id = e.id as string;
+    const name = e.name ?? id;
+    const image = budget > 0 ? await captureEmoji(id, Boolean(e.animated)) : undefined;
+    try {
+      await rest.delete(Routes.guildEmoji(guildId, id), { reason: "Deleted via discord-mcp" });
+    } catch (err) {
+      if (err instanceof DiscordAPIError && err.code === 10014) {
+        gone.push(name);
+        continue;
+      }
+      stopped = { at: i, why: (describeRateLimit(err) ?? (err instanceof Error ? err.message : String(err))).replace(/\.?$/, ".") };
+      break;
+    }
+    deleted.push(name);
+    if (image) budget -= image.length;
+    else unsaved += 1;
+    entries.push({
+      op: "deleted",
+      kind: "emoji",
+      id,
+      name,
+      animated: Boolean(e.animated),
+      roles: (e.roles as string[] | undefined) ?? [],
+      image: image ?? null,
+    });
+  }
+  const recorded = await recordChange(rest, guildId, "delete_emoji", entries);
+  const notes = [
+    ...(recorded.warning ? [recorded.warning] : []),
+    ...(unsaved > 0 ? [`The picture of ${unsaved === 1 ? "1 emoji" : `${unsaved} emoji`} could not be saved, so undo_change cannot bring ${unsaved === 1 ? "it" : "them"} back.`] : []),
+  ];
+  return { deleted, gone, ...(stopped ? { stopped } : {}), recorded, notes };
+}
+
+// Several emoji renamed in one call. Every current name has to pick out one
+// emoji before anything is renamed; renames go in order and stop at the
+// first refusal, saying which were done. Names that would end up shared
+// are said, since the name alone then no longer picks one.
+async function renameSeveralEmoji(
+  rest: REST,
+  guildId: string,
+  emojis: APIEmoji[],
+  renames: Array<{ emoji: string; name: string }>
+): Promise<CallToolResult> {
+  const candidates = emojis
+    .filter((e) => e.id && e.name)
+    .map((e) => ({ id: e.id as string, name: e.name as string, type: "emoji" }));
+  const plan: Array<{ id: string; from: string; to: string }> = [];
+  const problems: string[] = [];
+  for (const r of renames) {
+    const resolution = resolveOne(r.emoji, candidates);
+    if ("match" in resolution) plan.push({ id: resolution.match.id, from: resolution.match.name, to: r.name });
+    else problems.push(noSingleMatch("emoji", "emoji", r.emoji, resolution));
+  }
+  if (problems.length > 0) {
+    return fail(`Nothing was renamed: ${problems.length} of the ${renames.length} did not pick out one emoji. ${problems.join(" ")}`, {
+      unresolved: problems.length,
+    });
+  }
+  const perms = await botPermissions(rest, guildId);
+  requirePermissions(perms, [[P.ManageGuildExpressions, "Manage Expressions"]], "in this server");
+
+  const done: string[] = [];
+  for (const [i, p] of plan.entries()) {
+    try {
+      await rest.patch(Routes.guildEmoji(guildId, p.id), { body: { name: p.to }, reason: "Renamed via discord-mcp" });
+      done.push(`:${p.from}: to :${p.to}:`);
+    } catch (err) {
+      const why = (describeRateLimit(err) ?? (err instanceof Error ? err.message : String(err))).replace(/\.?$/, ".");
+      return fail(
+        `Renamed ${done.length} of ${plan.length} emoji, then Discord refused :${p.from}:: ${why} ` +
+          `Not renamed: ${plan.slice(i).map((x) => `:${x.from}:`).join(" ")}.`,
+        { renamed: done.length, not_renamed: plan.slice(i).map((x) => x.id) }
+      );
+    }
+  }
+  // Names now held by more than one emoji, counting the ones not renamed.
+  const after = new Map(emojis.filter((e) => e.id).map((e) => [e.id as string, e.name ?? ""]));
+  for (const p of plan) after.set(p.id, p.to);
+  const count = new Map<string, number>();
+  for (const n of after.values()) count.set(n.toLowerCase(), (count.get(n.toLowerCase()) ?? 0) + 1);
+  const shared = [...new Set(plan.map((p) => p.to).filter((n) => (count.get(n.toLowerCase()) ?? 0) > 1))];
+  return ok(
+    `Renamed ${done.length} emoji: ${done.slice(0, 20).join(", ")}${done.length > 20 ? `, and ${done.length - 20} more` : ""}.`,
+    { renamed: done.length },
+    shared.length > 0
+      ? [`More than one emoji is now named ${shared.map((n) => `:${n}:`).join(", ")}, so those names alone no longer pick one; use IDs.`]
+      : []
+  );
+}
+
+// Several emoji uploaded together, as an overhaul does. Everything is
+// checked before anything is sent: every picture loads, the batch fits the
+// free slots of each kind, and no two share a name. Then they go up in
+// order, recorded as one change so one undo removes them all; a refusal
+// partway (Discord's hourly upload hold, say) stops it and says which went.
+async function createSeveralEmoji(
+  rest: REST,
+  guildId: string,
+  wanted: Array<{ name: string; image_url?: string; image_file?: string }>
+): Promise<CallToolResult> {
+  const perms = await botPermissions(rest, guildId);
+  requirePermissions(perms, [[P.CreateGuildExpressions, "Create Expressions"]], "in this server");
+
+  const problems: string[] = [];
+  const seenNames = new Map<string, number>();
+  for (const w of wanted) {
+    if ((w.image_url === undefined) === (w.image_file === undefined)) problems.push(`:${w.name}: needs image_url or image_file, one of them.`);
+    seenNames.set(w.name.toLowerCase(), (seenNames.get(w.name.toLowerCase()) ?? 0) + 1);
+  }
+  const twice = [...seenNames.entries()].filter(([, n]) => n > 1).map(([n]) => `:${n}:`);
+  if (twice.length > 0) problems.push(`${twice.join(" ")} ${twice.length === 1 ? "is" : "are"} asked for more than once.`);
+  if (problems.length > 0) return fail(`Nothing was uploaded. ${problems.join(" ")}`);
+
+  const loaded: Array<{ name: string; dataUri: string; animated: boolean; note?: string }> = [];
+  for (const w of wanted) {
+    const image = await loadAsset({ url: w.image_url, file: w.image_file }, MAX_EMOJI_BYTES, IMAGE_TYPES, "image", 128);
+    if (!image.ok) problems.push(`:${w.name}: ${image.error}`);
+    else loaded.push({ name: w.name, dataUri: toDataUri(image.contentType, image.data), animated: isAnimatedImage(image.contentType, image.data), ...(image.note ? { note: image.note } : {}) });
+  }
+  if (problems.length > 0) {
+    return fail(`Nothing was uploaded: ${problems.length} of the ${wanted.length} pictures could not be used. ${problems.join(" ")}`, { unusable: problems.length });
+  }
+
+  const [existing, server] = await Promise.all([
+    (rest.get(Routes.guildEmojis(guildId)) as Promise<APIEmoji[]>).catch(() => undefined),
+    (rest.get(Routes.guild(guildId)) as Promise<APIGuild>).catch(() => undefined),
+  ]);
+  const limit = server ? emojiSlots(server.premium_tier, server.features as string[]) : null;
+  if (limit !== null && existing) {
+    for (const animated of [false, true]) {
+      const kind = animated ? "animated" : "static";
+      const need = loaded.filter((x) => x.animated === animated).length;
+      const used = existing.filter((e) => Boolean(e.animated) === animated).length;
+      if (need > 0 && used + need > limit) {
+        return fail(
+          `These ${need} ${kind} emoji do not fit: ${used} of the ${limit} ${kind} slots are in use (boost level ${server?.premium_tier ?? 0}), ` +
+            `so ${Math.max(0, limit - used)} ${limit - used === 1 ? "is" : "are"} free. Nothing was uploaded; delete some first, or upload fewer.`,
+          { slots: { kind, used, limit, need } }
+        );
+      }
+    }
+  }
+
+  const created: Array<{ id: string; name: string }> = [];
+  let stopped: { at: number; why: string } | undefined;
+  let uploadsThisHour = 0;
+  for (const [i, x] of loaded.entries()) {
+    try {
+      const emoji = (await rest.post(Routes.guildEmojis(guildId), { body: { name: x.name, image: x.dataUri }, reason: "Created via discord-mcp" })) as APIEmoji;
+      created.push({ id: emoji.id as string, name: emoji.name ?? x.name });
+      uploadsThisHour = noteEmojiUpload(guildId);
+    } catch (err) {
+      stopped = { at: i, why: (describeRateLimit(err) ?? (err instanceof Error ? err.message : String(err))).replace(/\.?$/, ".") };
+      break;
+    }
+  }
+  const recorded = await recordChange(rest, guildId, "create_emoji", created.map((c) => ({ op: "created" as const, kind: "emoji" as const, id: c.id, name: c.name })));
+  const shown = created.map((c) => `:${c.name}:`).join(" ");
+  const notes = [
+    ...(recorded.warning ? [recorded.warning] : []),
+    ...loaded.filter((x, i) => x.note && i < created.length).map((x) => `:${x.name}: ${x.note}`),
+    ...(existing && created.some((c) => existing.some((e) => e.name?.toLowerCase() === c.name.toLowerCase()))
+      ? [`Some names were already in use (${created.filter((c) => existing.some((e) => e.name?.toLowerCase() === c.name.toLowerCase())).map((c) => `:${c.name}:`).join(" ")}), so the name alone no longer picks one; use IDs.`]
+      : []),
+    ...(uploadsThisHour >= 40 ? [`That is ${uploadsThisHour} emoji uploaded to this server through this install in the last hour; Discord stops emoji uploads to a server for about an hour after roughly 50.`] : []),
+  ];
+  if (stopped) {
+    return fail(
+      `Uploaded ${created.length} of ${loaded.length} emoji${created.length ? ` (${shown})` : ""}, then Discord refused :${loaded[stopped.at].name}:: ${stopped.why} ` +
+        `Not uploaded: ${loaded.slice(stopped.at).map((x) => `:${x.name}:`).join(" ")}.` + undoNote(recorded),
+      { created, not_uploaded: loaded.slice(stopped.at).map((x) => x.name), ...changeData(recorded) }
+    );
+  }
+  return ok(`Created ${created.length} emoji: ${shown}.` + undoNote(recorded), { created, ...changeData(recorded) }, notes);
 }

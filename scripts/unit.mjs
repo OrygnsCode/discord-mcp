@@ -154,12 +154,25 @@ check(proceed === null, "valid token allows execution");
 
 const reuse = gateDestructive({ ...gateArgs, confirmToken: token });
 check(reuse !== null && reuse.isError === true, "token is single use");
+check(/already used/.test(envelopeOf(reuse).summary) && /each token works once/.test(envelopeOf(reuse).summary), "a used token is called used, not unknown");
 
 const dry = gateDestructive({ ...gateArgs, dryRun: true });
 const dryToken = envelopeOf(dry).data.confirm_token;
 __testing.pending.get(dryToken).expiresAt = Date.now() - 1;
 const expired = gateDestructive({ ...gateArgs, confirmToken: dryToken });
 check(expired !== null && expired.isError === true, "expired token is rejected");
+check(/expired/.test(envelopeOf(expired).summary) && /2 minutes after its preview/.test(envelopeOf(expired).summary) && !/already used/.test(envelopeOf(expired).summary), `an expired token is called expired, with how long tokens last (${envelopeOf(expired).summary})`);
+const expiredAgain = gateDestructive({ ...gateArgs, confirmToken: dryToken });
+check(/expired/.test(envelopeOf(expiredAgain).summary), "and still called expired when it comes back again");
+const madeUp = gateDestructive({ ...gateArgs, confirmToken: "0".repeat(32) });
+check(madeUp?.isError === true && /not one this server issued/.test(envelopeOf(madeUp).summary), "a token this server never issued is called that");
+const longToken = envelopeOf(gateDestructive({ ...gateArgs, ttlMs: 15 * 60_000 })).data.confirm_token;
+__testing.pending.get(longToken).expiresAt = Date.now() - 1;
+check(/15 minutes after its preview/.test(envelopeOf(gateDestructive({ ...gateArgs, confirmToken: longToken })).summary), "an expired token with a longer life says its own length");
+const spentBefore = __testing.spent.size;
+__testing.spent.get(longToken).at = Date.now() - 61 * 60_000;
+gateDestructive({ ...gateArgs, dryRun: true });
+check(__testing.spent.size === spentBefore - 1 && !__testing.spent.has(longToken), "spent tokens are forgotten after an hour");
 
 process.env.DISCORD_MCP_SAFE_MODE = "false";
 const unsafe = gateDestructive({ ...gateArgs });
@@ -1982,6 +1995,7 @@ try {
   check(setting("GUILD", { DISCORD_MCP_GUILD: "1", OMNICORD_GUILD: "2" }) === "1", "settings: the new name wins over the old one");
   check(setting("GUILD", { DISCORD_MCP_GUILD: "", OMNICORD_GUILD: "2" }) === undefined, "settings: a blank new name blocks the old one");
   check(setting("GUILD", {}) === undefined, "settings: unset is undefined");
+  check(setting("FILES_DIR", { DISCORD_MCP_FILES_DIR: "${user_config.files_folder}" }) === undefined && setting("GUILD", { DISCORD_MCP_GUILD: " ${user_config.guild} " }) === undefined && setting("GUILD", { DISCORD_MCP_GUILD: "x${user_config.guild}" }) === "x${user_config.guild}", "settings: a Claude Desktop placeholder left in place counts as unset");
   check(settingSource("TOOLS", { OMNICORD_TOOLS: "chat" }) === "OMNICORD_TOOLS", "settingSource: names the variable actually in use");
   check(settingSource("TOOLS", {}) === "DISCORD_MCP_TOOLS", "settingSource: defaults to the new name");
   const inUse = legacySettingsInUse({ OMNICORD_GUILD: "1", OMNICORD_TOOLS: "x", DISCORD_MCP_TOOLS: "y" });
@@ -2955,9 +2969,11 @@ try {
   check(rejectsRateLimit({ timeToReset: 60_000, retryAfter: 60_000, sublimitTimeout: 0 }) === false, "rate limits: an ordinary minute-long hold on a busy route is waited out, as before");
   check(rejectsRateLimit({ timeToReset: 0, retryAfter: 0, sublimitTimeout: MAX_SUBLIMIT_WAIT_MS }) === false, "rate limits: a short hidden limit is waited out");
   check(rejectsRateLimit({ timeToReset: MAX_RATE_LIMIT_WAIT_MS + 1, retryAfter: 0, sublimitTimeout: 0 }) === true, "rate limits: anything past five minutes fails");
+  check(rejectsRateLimit({ timeToReset: 2000, retryAfter: 2000, sublimitTimeout: 0, route: "/guilds/:id/roles/member-counts" }) === true, "rate limits: held role member counts are skipped, not waited for (three per two minutes)");
+  check(rejectsRateLimit({ timeToReset: 2000, retryAfter: 2000, sublimitTimeout: 0, route: "/guilds/:id/roles" }) === false, "rate limits: the role list itself is still waited for");
   const limited = new RateLimitError({ timeToReset: 0, limit: 2, method: "patch", hash: "h", url: "u", route: "/channels/:id", majorParameter: "1", global: false, retryAfter: 0, sublimitTimeout: 540_000, scope: "user" });
   const words = describeRateLimit(limited);
-  check(words?.includes("9 minutes") && words.includes("two name or topic changes") && words.includes("not sent"), "rate limits: the refusal says how long, why, and that nothing was sent");
+  check(words?.includes("9 minutes") && words.includes("two name or topic changes") && words.includes("Nothing was done"), "rate limits: the refusal says how long, why, and that nothing was done");
   check(describeRateLimit(new Error("other")) === null, "rate limits: other errors are left alone");
 }
 
@@ -4991,6 +5007,8 @@ try {
   }
 
   const big = Buffer.alloc(5000, 7);
+  // A 1x1 png.
+  const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   const srv = http.createServer((req, res) => {
     if (req.url === "/file.png") { res.writeHead(200, { "content-type": "image/png; charset=binary", "content-length": big.length }); return res.end(big); }
     if (req.url === "/stream.png") { res.writeHead(200, { "content-type": "image/png" }); res.write(big); return res.end(); }
@@ -4998,6 +5016,9 @@ try {
     if (req.url === "/hop") { res.writeHead(302, { location: "/file.png" }); return res.end(); }
     if (req.url === "/loop") { res.writeHead(302, { location: "/loop" }); return res.end(); }
     if (req.url === "/missing") { res.writeHead(404); return res.end(); }
+    if (req.url === "/octet.png") { res.writeHead(200, { "content-type": "application/octet-stream" }); return res.end(pngBytes); }
+    if (req.url === "/octet.txt") { res.writeHead(200, { "content-type": "application/octet-stream" }); return res.end("not an image at all"); }
+    if (req.url === "/page") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end("<html></html>"); }
     res.writeHead(500); res.end();
   });
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
@@ -5041,7 +5062,13 @@ try {
   r = await fetchPublicUrl(`http://127.0.0.1:${port}/chunked`, 8000);
   check(!r.ok && /larger than the limit/.test(r.error), "fetch: a body that grows past the limit is cut off");
   r = await fetchPublicUrl(`http://127.0.0.1:${port}/missing`, 8000);
-  check(!r.ok && /status 404/.test(r.error), "fetch: a failed status is reported");
+  check(!r.ok && r.error === `The link answered 404 (not found), so there was nothing to fetch from 127.0.0.1:${port}/missing. Use a direct link to the file itself, one that opens just the file in a browser.`, `fetch: a failed status is reported, with what it means and what to do (${r.ok ? "" : r.error})`);
+  r = await fetchPublicUrl("file:///Users/sam/Desktop/fire.png", 8000);
+  check(!r.ok && /Files on this computer are never read/.test(r.error), "fetch: a file on this computer is refused, and said to be");
+  r = await fetchPublicUrl("C:\\Users\\sam\\fire.png", 8000);
+  check(!r.ok && /Files on this computer are never read/.test(r.error), "fetch: so is a Windows path, which parses as a URL");
+  r = await fetchPublicUrl("data:image/png;base64,AAAA", 8000);
+  check(!r.ok && /not data\.$/.test(r.error), "fetch: a data URI is refused by its scheme");
 
   // The image helpers go through the same fetcher.
   const { fetchImageAsDataUri, fetchBinary, STICKER_TYPES } = await import("../dist/discord/images.js");
@@ -5053,6 +5080,14 @@ try {
   check(!tooBigStream.ok && tooBigStream.error === "The image is larger than the limit here, 1 KB.", "fetch: an oversized image with no declared size is worded the same way");
   const wrongType = await fetchBinary(`http://127.0.0.1:${port}/chunked`, 20000, STICKER_TYPES, "sticker");
   check(!wrongType.ok && /Unsupported sticker type "text\/plain"/.test(wrongType.error), "fetch: the type check still applies");
+  const octet = await fetchImageAsDataUri(`http://127.0.0.1:${port}/octet.png`, 10000);
+  check(octet.ok && octet.dataUri.startsWith("data:image/png;base64,"), "fetch: a png served as a generic download is known by its first bytes");
+  const octetText = await fetchImageAsDataUri(`http://127.0.0.1:${port}/octet.txt`, 10000);
+  check(!octetText.ok && /Unsupported image type "application\/octet-stream"/.test(octetText.error), "fetch: a generic download that is not an image is still refused");
+  const page = await fetchImageAsDataUri(`http://127.0.0.1:${port}/page`, 10000);
+  check(!page.ok && /That link is a web page, not the file itself/.test(page.error), "fetch: a web page is said to be one, with what to use instead");
+  const { sniffType } = await import("../dist/discord/images.js");
+  check(sniffType(pngBytes) === "image/png" && sniffType(Buffer.from([0xff, 0xd8, 0xff, 0xe0])) === "image/jpeg" && sniffType(Buffer.from("GIF89a")) === "image/gif" && sniffType(Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")])) === "image/webp" && sniffType(Buffer.from("OggS")) === "audio/ogg" && sniffType(Buffer.from("ID3")) === "audio/mpeg" && sniffType(Buffer.from("hello")) === undefined, "fetch: file types by their first bytes");
   delete process.env.DISCORD_MCP_ALLOW_PRIVATE_URLS;
   const blockedEmoji = await fetchImageAsDataUri(`http://127.0.0.1:${port}/file.png`, 10000);
   check(!blockedEmoji.ok && /private/.test(blockedEmoji.error), "fetch: emoji uploads refuse private addresses too");
@@ -5647,6 +5682,18 @@ try {
   // Ids and codes that are not ids or codes.
   const refused = await guarded(async () => { throw new UnsafeRouteError(); })({});
   check(refused.isError === true && /is not a valid Discord id, so the request was not sent/.test(JSON.parse(refused.content[0].text).summary), "ids: a request refused for its route is answered plainly, not as a crash");
+  {
+    const { DiscordAPIError } = await import("@discordjs/rest");
+    const { errorClass } = await import("../dist/usageStats.js");
+    const refusedAs = async (method, url) => JSON.parse((await guarded(async () => { throw new DiscordAPIError({ message: "Missing Access", code: 50001 }, 50001, 403, method, url, {}); })({})).content[0].text);
+    const list = await refusedAs("GET", "https://discord.com/api/v10/guilds/123456789012345678/members?limit=1000&after=0");
+    check(/Server Members intent is off/.test(list.summary) && errorClass(list.summary, list.data) === "intents", `members: a refused member list is put down to the intent, and counted as one (${list.summary})`);
+    const search = await refusedAs("GET", "https://discord.com/api/v10/guilds/123456789012345678/members/search?query=a&limit=5");
+    check(/Server Members intent/.test(search.summary), "members: so is a refused member search");
+    const one = await refusedAs("GET", "https://discord.com/api/v10/guilds/123456789012345678/members/123456789012345679");
+    const channel = await refusedAs("GET", "https://discord.com/api/v10/channels/123456789012345678/messages");
+    check(!/intent/.test(one.summary) && /Discord refused access \(403\)/.test(channel.summary), "members: other refusals keep the general message");
+  }
   const tpl = tools.delete_server_template.def.inputSchema.code;
   check(tpl.safeParse("aB3-xY9").success && !tpl.safeParse("..").success && !tpl.safeParse("a/b").success && !tools.sync_server_template.def.inputSchema.code.safeParse("../x").success, "ids: a template code is letters, digits, and dashes");
   check(tpl.safeParse("https://discord.new/aB3-xY9").success && tpl.safeParse("discord.com/template/aB3-xY9").success && !tpl.safeParse("https://evil.example/aB3-xY9").success && !tpl.safeParse("https://discord.new/../x").success, "ids: a template's link is taken as well as its code, and nothing else");
@@ -6057,7 +6104,7 @@ try {
     reset();
     Object.assign(guild, { roles: [], emojis: [], premium_tier: 0 });
     let o = await call("get_server_overview");
-    check(!o.isError && o.summary.endsWith("boost tier 0.") && !/paused|Right now|set_incident_actions/.test(o.summary) && !("incidents" in o.data), `overview: with nothing paused it says nothing about pauses (${o.summary})`);
+    check(!o.isError && o.summary.endsWith("boost tier 0. Slots used: 0 of 50 static emoji, 0 of 50 animated, 0 of 5 stickers. Not unlocked at this boost level: a banner, an animated icon, role icons, and gradient role colors.") && !/paused|Right now|set_incident_actions/.test(o.summary) && !("incidents" in o.data), `overview: with nothing paused it says nothing about pauses (${o.summary})`);
     const invitesUntil = hours(3);
     guild.incidents_data = { invites_disabled_until: discordTime(invitesUntil), dms_disabled_until: null };
     o = await call("get_server_overview");
@@ -6071,7 +6118,7 @@ try {
     check(/Right now DMs between members who are not friends are paused until/.test(o.summary) && !/new invites/.test(o.summary) && o.data.incidents.invites_paused_until === null, "overview: or the DM pause alone");
     guild.incidents_data = { invites_disabled_until: hours(-1), dms_disabled_until: hours(-2) };
     o = await call("get_server_overview");
-    check(o.summary.endsWith("boost tier 0.") && !("incidents" in o.data), "overview: a pause that has run out is not one");
+    check(o.summary.endsWith("boost tier 0. Slots used: 0 of 50 static emoji, 0 of 50 animated, 0 of 5 stickers. Not unlocked at this boost level: a banner, an animated icon, role icons, and gradient role colors.") && !("incidents" in o.data), "overview: a pause that has run out is not one");
     guild.incidents_data = { invites_disabled_until: null, dms_disabled_until: null, dm_spam_detected_at: "2026-11-10T04:05:06.000Z" };
     o = await call("get_server_overview");
     check(!/paused/.test(o.summary) && o.data.incidents.dm_spam_detected_at === "2026-11-10T04:05:06.000Z" && o.data.incidents.invites_paused_until === null, "overview: what Discord flagged is in the data even with nothing paused");
@@ -7851,6 +7898,142 @@ try {
   check(/splash: the earlier image was not saved when it was changed, so it cannot be put back\./.test(lines) && actions[0].fields.splash === undefined && actions[0].fields.icon === saved && actions[0].fields.banner === null, "undo images: a saved image goes back as data, and a bare hash is left alone and said so");
 }
 
+// --- what a boost level allows ---
+{
+  const L = await import("../dist/discord/limits.js");
+  check([0, 1, 2, 3, 9].map((t) => L.emojiSlots(t, [])).join() === "50,100,150,250,250" && L.emojiSlots(1, ["MORE_EMOJI"]) === null, "limits: emoji slots by boost level, unknown with Discord's extra-slot feature");
+  check([0, 1, 2, 3].map((t) => L.stickerSlots(t, [])).join() === "5,15,30,60" && [0, 1, 2, 3].map((t) => L.soundSlots(t, [])).join() === "8,24,36,48", "limits: sticker and sound slots by boost level");
+  check(L.isAnimatedImage("image/gif", Buffer.from("GIF89a")) && !L.isAnimatedImage("image/png", Buffer.alloc(8)) && L.isAnimatedImage("image/webp", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8X"), Buffer.alloc(14), Buffer.from("ANIM")])) && !L.isAnimatedImage("image/webp", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8 "), Buffer.alloc(30)])), "limits: what counts as an animated emoji");
+  check(L.missingUnlocks([], true).join("|") === "a banner|an animated icon|role icons|gradient role colors" && L.missingUnlocks(["BANNER", "ROLE_ICONS"], true).join("|") === "an animated icon|gradient role colors", "limits: what the boost level has not unlocked, in words");
+  L.__testing.recentUploads.clear();
+  const t0 = Date.now();
+  let n = 0;
+  for (let i = 0; i < 5; i++) n = L.noteEmojiUpload("1", t0 + i);
+  check(n === 5 && L.noteEmojiUpload("1", t0 + 61 * 60_000) === 1, "limits: uploads are counted over the last hour only");
+  L.__testing.recentUploads.clear();
+  const { describeRateLimit } = await import("../dist/discord/client.js");
+  const { RateLimitError } = await import("@discordjs/rest");
+  const held = new RateLimitError({ timeToReset: 3_300_000, limit: 1, method: "post", hash: "h", url: "u", route: "/guilds/:id/emojis", majorParameter: "1", global: false, retryAfter: 3_300_000, sublimitTimeout: 0, scope: "shared" });
+  check(/about 50 emoji uploads per server an hour/.test(describeRateLimit(held)), "rate limits: an emoji upload hold names the hourly limit");
+}
+
+// --- local files from the chosen folder, and making big images smaller ---
+{
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { PNG } = await import("pngjs");
+  const jpegjs = (await import("jpeg-js")).default;
+  const { readLocalFile } = await import("../dist/discord/localFiles.js");
+  const { shrinkImage, imageDimensions } = await import("../dist/discord/shrink.js");
+  const { loadAsset, IMAGE_TYPES, AUDIO_TYPES } = await import("../dist/discord/images.js");
+
+  // Noise does not compress, so these are big for their size in pixels.
+  const noisyPng = (w, h) => {
+    const p = new PNG({ width: w, height: h });
+    for (let i = 0; i < p.data.length; i++) p.data[i] = (i * 2654435761) >>> 24;
+    return PNG.sync.write(p);
+  };
+  const noisyJpeg = (w, h) => {
+    const data = Buffer.alloc(w * h * 4);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 2654435761) >>> 24;
+    return jpegjs.encode({ data, width: w, height: h }, 95).data;
+  };
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dmcp-files-"));
+  const folder = path.join(root, "uploads");
+  fs.mkdirSync(path.join(folder, "sub"), { recursive: true });
+  const small = noisyPng(32, 32);
+  fs.writeFileSync(path.join(folder, "fire.png"), small);
+  fs.writeFileSync(path.join(folder, "sub", "wave.png"), small);
+  fs.writeFileSync(path.join(folder, "notes.png"), "DISCORD_TOKEN=not-a-real-token\n");
+  fs.writeFileSync(path.join(root, "outside.png"), small);
+  const big = noisyPng(700, 700);
+  fs.writeFileSync(path.join(folder, "big.png"), big);
+  const saved = process.env.DISCORD_MCP_FILES_DIR;
+  try {
+    delete process.env.DISCORD_MCP_FILES_DIR;
+    let f = readLocalFile("fire.png", 262144);
+    check(!f.ok && /none is set/.test(f.error) && /DISCORD_MCP_FILES_DIR/.test(f.error), "files: with no folder set, nothing local is read, and the setting is named");
+    process.env.DISCORD_MCP_FILES_DIR = folder;
+    f = readLocalFile("fire.png", 262144);
+    check(f.ok && f.data.equals(small), "files: a file in the folder is read by name");
+    f = readLocalFile("sub/wave.png", 262144);
+    check(f.ok, "files: and one in a folder inside it");
+    f = readLocalFile(path.join(folder, "fire.png"), 262144);
+    check(f.ok, "files: a full path inside the folder works too");
+    f = readLocalFile("../outside.png", 262144);
+    check(!f.ok && /not inside the files folder/.test(f.error), `files: a name that climbs out of the folder is refused (${f.ok ? "" : f.error})`);
+    f = readLocalFile(path.join(root, "outside.png"), 262144);
+    check(!f.ok && /not inside the files folder/.test(f.error), "files: and so is a full path outside it");
+    const probe = readLocalFile(path.join(root, "no-such-file.png"), 262144);
+    check(!probe.ok && /not inside the files folder/.test(probe.error) && !/There is no file/.test(probe.error), "files: outside the folder, a file that does not exist gets the same answer as one that does");
+    f = readLocalFile("sub", 262144);
+    check(!f.ok && /is not a file/.test(f.error), "files: a folder is not a file");
+    f = readLocalFile("missing.png", 262144);
+    check(!f.ok && /There is no file named "missing.png"/.test(f.error), "files: a missing file is named");
+    let linked = false;
+    try { fs.symlinkSync(path.join(root, "outside.png"), path.join(folder, "link.png")); linked = true; } catch {}
+    if (linked) {
+      f = readLocalFile("link.png", 262144);
+      check(!f.ok && /not inside the files folder/.test(f.error), "files: a link in the folder that points outside it is refused");
+    }
+    // A folder link (a junction on Windows, which needs no admin rights)
+    // that leads out of the folder.
+    let joined = false;
+    try { fs.symlinkSync(root, path.join(folder, "door"), "junction"); joined = true; } catch {}
+    check(joined || linked, "files: a link could be made here to test with");
+    if (joined) {
+      f = readLocalFile("door/outside.png", 262144);
+      check(!f.ok && /not inside the files folder/.test(f.error), `files: a folder link that leads outside is refused (${f.ok ? "read!" : f.error})`);
+    }
+    process.env.DISCORD_MCP_FILES_DIR = path.join(root, "nope");
+    f = readLocalFile("fire.png", 262144);
+    check(!f.ok && /does not exist or is not a folder/.test(f.error), "files: a folder that does not exist is said to be");
+    process.env.DISCORD_MCP_FILES_DIR = folder;
+
+    // Through the loader: the file's own bytes decide what it is.
+    let a = await loadAsset({ file: "notes.png" }, 262144, IMAGE_TYPES, "image", 128);
+    check(!a.ok && /Unsupported image type "unknown"/.test(a.error), "files: a text file named .png is not an image, whatever its name");
+    a = await loadAsset({ file: "fire.png" }, 262144, AUDIO_TYPES, "sound");
+    check(!a.ok && /Unsupported sound type "image\/png"/.test(a.error), "files: an image is not a sound");
+    a = await loadAsset({ file: "fire.png" }, 262144, IMAGE_TYPES, "image", 128);
+    check(a.ok && a.contentType === "image/png" && a.note === undefined, "files: a small png goes as it is");
+    a = await loadAsset({ file: "big.png" }, 262144, IMAGE_TYPES, "image", 128);
+    check(a.ok && a.contentType === "image/png" && a.data.length <= 262144 && imageDimensions(a.data, "image/png").width === 128 && /was \d+ KB \(700x700\), over the 256 KB limit, so it was made 128x128/.test(a.note), `files: a big png is made smaller, and the note says so (${a.ok ? a.note : a.error})`);
+    a = await loadAsset({ file: "big.png" }, 262144, IMAGE_TYPES, "image");
+    check(!a.ok && /the limit here is 256 KB/.test(a.error), "files: without shrinking, a big one is refused as before");
+  } finally {
+    if (saved === undefined) delete process.env.DISCORD_MCP_FILES_DIR;
+    else process.env.DISCORD_MCP_FILES_DIR = saved;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // The shrinker on its own.
+  const bigJpeg = noisyJpeg(1000, 600);
+  check(JSON.stringify(imageDimensions(bigJpeg, "image/jpeg")) === '{"width":1000,"height":600}' && JSON.stringify(imageDimensions(big, "image/png")) === '{"width":700,"height":700}', "shrink: sizes are read from the header");
+  let s = shrinkImage(bigJpeg, "image/jpeg", 262144, 128, "image");
+  check(s.ok && s.width === 128 && s.height === 77 && s.contentType === "image/png", `shrink: a jpeg keeps its shape and comes out as png (${s.ok ? `${s.width}x${s.height}` : s.error})`);
+  // Half transparent red over transparent: the edge stays red, not darkened.
+  const edge = new PNG({ width: 4, height: 4 });
+  for (let i = 0; i < 16; i++) edge.data.set(i % 4 < 2 ? [255, 0, 0, 255] : [0, 0, 0, 0], i * 4);
+  s = shrinkImage(PNG.sync.write(edge), "image/png", 262144, 1, "image");
+  const px = PNG.sync.read(s.data).data;
+  check(s.ok && px[0] === 255 && px[1] === 0 && px[3] === 128, `shrink: transparent pixels do not darken what they average with (${[...px].join(",")})`);
+  const apng = Buffer.concat([big.subarray(0, 33), Buffer.from([0, 0, 0, 8]), Buffer.from("acTL"), Buffer.alloc(12), big.subarray(33)]);
+  s = shrinkImage(apng, "image/png", 262144, 128, "image");
+  check(!s.ok && /animated png/.test(s.error), "shrink: an animated png is refused, not flattened");
+  s = shrinkImage(Buffer.from("GIF89a"), "image/gif", 262144, 128, "image");
+  check(!s.ok && /only a still png or jpeg can be made smaller here; this one is a gif/.test(s.error), "shrink: so is a gif");
+  const claimsHuge = Buffer.from(big);
+  claimsHuge.writeUInt32BE(10000, 16);
+  claimsHuge.writeUInt32BE(10000, 20);
+  s = shrinkImage(claimsHuge, "image/png", 262144, 128, "image");
+  check(!s.ok && /10000x10000, larger than the 4096x4096/.test(s.error), "shrink: a header claiming a huge picture is refused before anything is decoded");
+  s = shrinkImage(Buffer.from("not a png at all, just text"), "image/png", 262144, 128, "image");
+  check(!s.ok && /could not be read as a png/.test(s.error), "shrink: something that is not a png says so");
+}
+
 // --- settings tools against a fake Discord ---
 {
   const { getRestForToken } = await import("../dist/discord/client.js");
@@ -7859,6 +8042,14 @@ try {
   const { registerManageTools } = await import("../dist/tools/manage.js");
   const { registerWriteTools } = await import("../dist/tools/write.js");
   const { registerReadTools } = await import("../dist/tools/read.js");
+  const { registerCommunityTools } = await import("../dist/tools/community.js");
+  const { registerStructureTools } = await import("../dist/tools/structure.js");
+  const { DiscordAPIError } = await import("@discordjs/rest");
+  const emojis = [];
+  const stickerList = [];
+  const soundList = [];
+  let nextEmoji = 0;
+  let refuseEmoji = null;
   const http = await import("node:http");
   const fs = await import("node:fs");
   const os = await import("node:os");
@@ -7907,7 +8098,23 @@ try {
     if (p === `/guilds/${G}/channels` && method === "GET") return structuredClone(channels);
     if (p === `/guilds/${G}/channels` && method === "POST") { const c = { id: "990000000000000888", ...opts.body }; channels.push(c); return structuredClone(c); }
     if (p === `/guilds/${G}/members/${BOT}`) return { user: { id: BOT }, roles: [BOTROLE] };
-    if (p === `/guilds/${G}/emojis`) return [];
+    if (p === `/guilds/${G}/emojis` && method === "GET") return structuredClone(emojis);
+    if ((m = p.match(/^\/guilds\/\d+\/emojis\/(\d+)$/)) && method === "PATCH") { const e = emojis.find((x) => x.id === m[1]); Object.assign(e, opts.body); return structuredClone(e); }
+    if (p === `/guilds/${G}/stickers` && method === "GET") return structuredClone(stickerList);
+    if (p === `/guilds/${G}/stickers` && method === "POST") { const x = { id: String(990000000000002100n + BigInt(nextEmoji++)), name: opts.body.name, tags: opts.body.tags, format_type: 1 }; stickerList.push(x); return structuredClone(x); }
+    if (p === `/guilds/${G}/soundboard-sounds` && method === "POST") { const x = { sound_id: String(990000000000003100n + BigInt(nextEmoji++)), name: opts.body.name }; soundList.push(x); return structuredClone(x); }
+    if ((m = p.match(/^\/guilds\/\d+\/stickers\/(\d+)$/)) && method === "DELETE") { const i = stickerList.findIndex((x) => x.id === m[1]); if (i < 0) throw new DiscordAPIError({ message: "Unknown Sticker", code: 10060 }, 10060, 404, "DELETE", p, {}); stickerList.splice(i, 1); return null; }
+    if (p === `/guilds/${G}/soundboard-sounds` && method === "GET") return { items: structuredClone(soundList) };
+    if ((m = p.match(/^\/guilds\/\d+\/soundboard-sounds\/(\d+)$/)) && method === "DELETE") { const i = soundList.findIndex((x) => x.sound_id === m[1]); soundList.splice(i, 1); return null; }
+    if ((m = p.match(/^\/guilds\/\d+\/emojis\/(\d+)$/)) && method === "DELETE") {
+      if (refuseEmoji === m[1]) throw new DiscordAPIError({ message: "Internal Server Error", code: 0 }, 0, 500, "DELETE", p, {});
+      const i = emojis.findIndex((e) => e.id === m[1]);
+      if (i < 0) throw new DiscordAPIError({ message: "Unknown Emoji", code: 10014 }, 10014, 404, "DELETE", p, {});
+      emojis.splice(i, 1);
+      return null;
+    }
+    if (p === `/guilds/${G}/emojis` && method === "POST") { const e = { id: String(990000000000000700n + BigInt(nextEmoji++)), name: opts.body.name, animated: false, ...(opts.body.roles ? { roles: opts.body.roles } : {}) }; emojis.push(e); return structuredClone(e); }
+    if (p === `/guilds/${G}/roles` && method === "PATCH") return structuredClone(roles);
     if ((m = p.match(/^\/channels\/(\d+)$/))) { const c = channels.find((x) => x.id === m[1]); if (method === "PATCH") Object.assign(c, opts.body); return structuredClone(c); }
     throw new Error(`fake Discord: no route for ${method} ${p}`);
   }
@@ -7917,12 +8124,30 @@ try {
   const tools = {};
   const fakeServer = { registerTool(name, def, cb) { tools[name] = { def, cb }; } };
   const config = { bots: [{ name: "default", token: TOKEN, isDefault: true }], token: TOKEN, defaultGuild: G, toolsets: {} };
-  for (const reg of [registerSettingsTools, registerManageTools, registerWriteTools, registerReadTools]) reg(fakeServer, config);
+  const { registerChangeTools } = await import("../dist/tools/changes.js");
+  const { registerExpressionTools } = await import("../dist/tools/expressions.js");
+  for (const reg of [registerSettingsTools, registerManageTools, registerWriteTools, registerReadTools, registerCommunityTools, registerStructureTools, registerChangeTools, registerExpressionTools]) reg(fakeServer, config);
   const call = async (name, args) => { invalidateGuildCaches(G); const r = await tools[name].cb(args); return { ...JSON.parse(r.content[0].text), isError: r.isError === true }; };
-  const imgSrv = http.createServer((req, res) => { res.writeHead(200, { "content-type": req.url.endsWith(".gif") ? "image/gif" : "image/png" }); res.end(Buffer.alloc(200, 9)); });
+  // Pictures fetched for upload, and the CDN emoji are saved from before
+  // deletion, both come from here.
+  const cdnHits = [];
+  const imgSrv = http.createServer((req, res) => {
+    if (req.url.startsWith("/emojis/") || req.url.startsWith("/stickers/") || req.url.startsWith("/soundboard-sounds/")) cdnHits.push(req.url);
+    if (req.url.startsWith("/soundboard-sounds/")) {
+      res.writeHead(200, { "content-type": "audio/mpeg" });
+      return res.end(Buffer.concat([Buffer.from("ID3"), Buffer.alloc(200, 1)]));
+    }
+    res.writeHead(200, { "content-type": req.url.endsWith(".gif") || req.url.includes(".gif?") ? "image/gif" : "image/png" });
+    res.end(Buffer.alloc(200, 9));
+  });
   await new Promise((ok) => imgSrv.listen(0, "127.0.0.1", ok));
   const img = (name) => `http://127.0.0.1:${imgSrv.address().port}/${name}`;
   process.env.DISCORD_MCP_ALLOW_PRIVATE_URLS = "true";
+  const imagesModule = await import("../dist/discord/images.js");
+  const realCdn = imagesModule.__testing.cdnBase;
+  const realMedia = imagesModule.__testing.mediaBase;
+  imagesModule.__testing.cdnBase = `http://127.0.0.1:${imgSrv.address().port}`;
+  imagesModule.__testing.mediaBase = `http://127.0.0.1:${imgSrv.address().port}`;
 
   reset();
   let r = await call("update_server", { banner_url: img("b.png") });
@@ -8013,8 +8238,307 @@ try {
   r = await call("list_roles", {});
   const vip = r.data.roles.find((x) => x.name === "VIP");
   check(vip.members === 7 && vip.gradient_to === "#ffffff" && vip.icon === "⭐" && r.data.roles.find((x) => x.name === "Bot").members === 0 && r.data.roles.find((x) => x.name === "@everyone").members === undefined, "list_roles: member counts, gradients, and icons");
+  check(vip.bot_cannot_change === undefined && r.data.roles.find((x) => x.name === "Bot").bot_cannot_change === "managed by an integration" && r.data.roles.find((x) => x.name === "Bot").bot_has === true, "list_roles: the bot's own role is marked as its own, and as one it cannot change");
+  reset();
+  roles.push(
+    { id: "990000000000000110", name: "Owner", permissions: s(P.Administrator), position: 12 },
+    { id: "990000000000000111", name: "OtherBot", permissions: "0", position: 3, managed: true },
+    // Same position as the bot's role: the older id ranks higher, so this one is above it.
+    { id: "990000000000000101", name: "Twin", permissions: "0", position: 9 },
+    { id: "990000000000000190", name: "Younger twin", permissions: "0", position: 9 },
+  );
+  r = await call("list_roles", {});
+  const mark = (n) => r.data.roles.find((x) => x.name === n).bot_cannot_change;
+  check(mark("Owner") === "not below the bot's highest role" && mark("Twin") === "not below the bot's highest role" && mark("Younger twin") === undefined && mark("OtherBot") === "managed by an integration" && mark("VIP") === undefined, `list_roles: roles above the bot and other integrations' roles are marked, by Discord's own order (${JSON.stringify(r.data.roles.map((x) => [x.name, x.bot_cannot_change ?? "-"]))})`);
+  check(/The bot cannot change 4 of them \(marked bot_cannot_change\); it can change only roles below its highest role, "Bot"\./.test(r.summary), `list_roles: and the summary says how many and why (${r.summary})`);
+  check(mark("@everyone") === undefined, "list_roles: @everyone is not marked, since its permissions can change");
+  guild.features = [];
+  r = await call("list_roles", {});
+  check(/ Roles here cannot have gradient or holographic colors \(they need the Enhanced Role Colors feature\) and icons \(they need boost level 2\); a solid color works\.$/.test(r.summary) && JSON.stringify(r.data.role_styles) === '{"gradient_colors":false,"holographic":false,"icons":false}', `list_roles: says up front which role styles this server cannot have (${r.summary})`);
+  guild.features = ["ENHANCED_ROLE_COLORS", "ROLE_ICONS"];
+  r = await call("list_roles", {});
+  check(!/cannot have/.test(r.summary) && r.data.role_styles.icons === true && r.data.role_styles.gradient_colors === true, "list_roles: and says nothing of it when it can have them all");
+
+  // An emoji and roles overhaul, as a big server sees one.
+  reset();
+  r = await call("create_emoji", { name: "pog", image_url: img("pog.png") });
+  check(!r.isError && (r.warnings ?? []).length === 0, "create_emoji: a new name, no warning");
+  r = await call("create_emoji", { name: "POG", image_url: img("pog.png") });
+  check(!r.isError && /Another emoji already had this name, so the name alone no longer picks one: use the ID \(990000000000000701\)/.test((r.warnings ?? []).join(" ")), `create_emoji: a name already in use is said, with the new one's ID (${(r.warnings ?? []).join(" ")})`);
+  // Several emoji under one preview and one token.
+  for (const n of ["old_a", "old_b", "old_c", "old_d"]) await call("create_emoji", { name: n, image_url: img(`${n}.png`) });
+  const idOf = (n) => emojis.find((e) => e.name === n).id;
+  r = await call("delete_emoji", { emoji: "old_a", emojis: ["old_b"] });
+  check(r.isError && /not both and not neither/.test(r.summary), "delete_emoji: emoji and emojis together are refused");
+  r = await call("delete_emoji", {});
+  check(r.isError && /not both and not neither/.test(r.summary), "delete_emoji: and so is neither");
+  r = await call("delete_emoji", { emojis: ["old_a", "old_b", "nope_x"] });
+  check(r.isError && /^Nothing was deleted: 1 of the 3 names did not pick out one emoji\. No single emoji matches "nope_x"\./.test(r.summary) && emojis.length === 6, `delete_emoji: one name that matches nothing stops all of them (${r.summary})`);
+  r = await call("delete_emoji", { emojis: ["old_a", "old_b", "old_c", idOf("old_a")] });
+  check(r.data?.executed === false && /^Safe mode: nothing was changed\. Would delete 3 emoji: :old_a: :old_b: :old_c:\. Messages that used them keep a broken reference\./.test(r.summary) && emojis.length === 6, `delete_emoji: one preview for several, a repeat counted once (${r.summary})`);
+  let bulkToken = r.data.confirm_token;
+  r = await call("delete_emoji", { emojis: ["old_a", "old_b"], confirm_token: bulkToken });
+  check(r.isError && /different action/.test(r.summary) && emojis.length === 6, "delete_emoji: the token covers exactly the previewed set, not a smaller one");
+  r = await call("delete_emoji", { emojis: ["old_a", "old_b", "old_c"] });
+  bulkToken = r.data.confirm_token;
+  emojis.splice(emojis.findIndex((e) => e.name === "old_b"), 1);
+  r = await call("delete_emoji", { emojis: ["old_a", "old_b", "old_c"], confirm_token: bulkToken });
+  check(r.isError && /Nothing was deleted/.test(r.summary) && emojis.some((e) => e.name === "old_a"), `delete_emoji: one gone since the preview stops the rest, so nothing unpreviewed happens (${r.summary})`);
+  r = await call("delete_emoji", { emojis: ["old_a", "old_c", "old_d"] });
+  bulkToken = r.data.confirm_token;
+  refuseEmoji = idOf("old_c");
+  r = await call("delete_emoji", { emojis: ["old_a", "old_c", "old_d"], confirm_token: bulkToken });
+  check(r.isError && /^Deleted 1 of 3 emoji, then Discord refused :old_c:: Internal Server Error\. Not deleted: :old_c: :old_d:\./.test(r.summary) && !emojis.some((e) => e.name === "old_a") && emojis.some((e) => e.name === "old_d"), `delete_emoji: a refusal partway says what was and was not deleted (${r.summary})`);
+  refuseEmoji = null;
+  r = await call("delete_emoji", { emojis: ["old_c", "old_d"] });
+  cdnHits.length = 0;
+  r = await call("delete_emoji", { emojis: ["old_c", "old_d"], confirm_token: r.data.confirm_token });
+  check(!r.isError && /^Deleted 2 emoji\. undo_change with change_id [a-f0-9]{16} reverses it\.$/.test(r.summary) && !emojis.some((e) => /^old_/.test(e.name)), `delete_emoji: confirmed, all of them go, and it can be undone (${r.summary})`);
+  check(cdnHits.length === 2 && cdnHits.every((u) => /^\/emojis\/\d+\.png\?size=128&quality=lossless$/.test(u)), `delete_emoji: each picture is saved from the CDN first, at 128 pixels (${cdnHits.join(" ")})`);
+
+  // Undo brings them back from the saved pictures, under new ids.
+  const bulkChange = r.data.change_id;
+  writes.length = 0;
+  r = await call("undo_change", { change_id: bulkChange });
+  check(r.data?.executed === false && /Recreate the emoji :old_c: from its saved picture/.test(JSON.stringify(r)) && /still show it as missing/.test(JSON.stringify(r)), `undo_change: the preview says the emoji come back from their pictures, with new ids (${r.summary})`);
+  r = await call("undo_change", { change_id: bulkChange, confirm_token: r.data.confirm_token });
+  const recreated = writes.filter((w) => w.method === "POST" && w.path === `/guilds/${G}/emojis`);
+  check(!r.isError && recreated.length === 2 && recreated.every((w) => w.body.image.startsWith("data:image/png;base64,")) && ["old_c", "old_d"].every((n) => emojis.some((e) => e.name === n)), `undo_change: both emoji are back (${r.summary})`);
+  // Recreating again is refused: they exist again by name.
+  r = await call("undo_change", { change_id: bulkChange });
+  check(/Nothing is left to undo|already been undone/.test(r.summary), `undo_change: done once, it is not done twice (${r.summary})`);
+
+  // A created emoji: undo deletes it.
+  r = await call("create_emoji", { name: "made_here", image_url: img("m.png") });
+  const madeChange = r.data.change_id;
+  check(/undo_change with change_id [a-f0-9]{16} reverses it/.test(r.summary), "create_emoji: the new emoji can be undone");
+  r = await call("undo_change", { change_id: madeChange });
+  check(/Delete the emoji :made_here:, which this change created/.test(JSON.stringify(r)), `undo_change: undoing a created emoji deletes it (${r.summary})`);
+  r = await call("undo_change", { change_id: madeChange, confirm_token: r.data.confirm_token });
+  check(!r.isError && !emojis.some((e) => e.name === "made_here"), `undo_change: and it is gone (${r.summary})`);
+  // Clean up the two brought back, outside the tools.
+  for (const n of ["old_c", "old_d"]) emojis.splice(emojis.findIndex((e) => e.name === n), 1);
+
+  // A full server is said before anything is uploaded; the other kind of
+  // slot is separate.
+  {
+    const keep = emojis.splice(0);
+    for (let i = 0; i < 50; i++) emojis.push({ id: String(990000000000001000n + BigInt(i)), name: `full_${i}`, animated: false });
+    writes.length = 0;
+    r = await call("create_emoji", { name: "one_more", image_url: img("x.png") });
+    check(r.isError && /^All 50 static emoji slots are in use \(boost level 0\), so nothing was uploaded\./.test(r.summary) && !writes.some((w) => w.method === "POST"), `create_emoji: a full server is said before anything is sent (${r.summary})`);
+    r = await call("create_emoji", { name: "moving", image_url: img("x.gif") });
+    check(!r.isError && r.data.slots?.kind === "animated" && r.data.slots.used === 1 && r.data.slots.limit === 50, "create_emoji: an animated one still fits, in its own slots");
+    emojis.splice(0);
+    for (let i = 0; i < 48; i++) emojis.push({ id: String(990000000000001000n + BigInt(i)), name: `nearly_${i}`, animated: false });
+    r = await call("create_emoji", { name: "near_full", image_url: img("x.png") });
+    check(!r.isError && (r.warnings ?? []).includes("Only 1 static emoji slot left."), `create_emoji: says when slots are running out (${(r.warnings ?? []).join(" ")})`);
+    emojis.splice(0, emojis.length, ...keep);
+  }
+
+  // Several stickers and sounds at once, and several emoji renamed.
+  stickerList.push({ id: "990000000000002001", name: "wave", tags: "x", format_type: 1 }, { id: "990000000000002002", name: "hype", tags: "x", format_type: 4 }, { id: "990000000000002003", name: "keep", tags: "x", format_type: 1 });
+  r = await call("delete_sticker", { sticker: "wave", stickers: ["hype"] });
+  check(r.isError && /not both and not neither/.test(r.summary), "delete_sticker: sticker and stickers together are refused");
+  r = await call("delete_sticker", { stickers: ["wave", "hype"] });
+  check(r.data?.executed === false && /^Safe mode: nothing was changed\. Would delete 2 stickers: "wave", "hype"\./.test(r.summary), `delete_sticker: one preview for several (${r.summary})`);
+  r = await call("delete_sticker", { stickers: ["wave", "hype"], confirm_token: r.data.confirm_token });
+  check(!r.isError && /^Deleted 2 stickers\. undo_change with change_id [a-f0-9]{16} reverses it\.$/.test(r.summary) && stickerList.length === 1 && stickerList[0].name === "keep", `delete_sticker: confirmed, both go and the other stays (${r.summary})`);
+  // Undo brings both back from the saved images; the gif one from Discord's media host.
+  {
+    const stickerChange = r.data.change_id;
+    writes.length = 0;
+    r = await call("undo_change", { change_id: stickerChange });
+    check(r.data?.executed === false && /Recreate the sticker \\?"wave\\?" from its saved image/.test(JSON.stringify(r)), `undo_change: deleted stickers come back from saved images (${r.summary})`);
+    r = await call("undo_change", { change_id: stickerChange, confirm_token: r.data.confirm_token });
+    const posted = writes.filter((w) => w.method === "POST" && w.path === `/guilds/${G}/stickers`);
+    check(!r.isError && posted.length === 2 && ["wave", "hype"].every((n) => stickerList.some((x) => x.name === n)), `undo_change: both stickers are back (${r.summary})`);
+    stickerList.splice(0, stickerList.length, ...stickerList.filter((x) => x.name === "keep"));
+  }
+  soundList.push({ sound_id: "990000000000003001", name: "airhorn" }, { sound_id: "990000000000003002", name: "boo" });
+  r = await call("delete_soundboard_sound", { sounds: ["airhorn", "nope_sound"] });
+  check(r.isError && /^Nothing was deleted: 1 of the 2 names did not pick out one sound\./.test(r.summary) && soundList.length === 2, `delete_soundboard_sound: one name that matches nothing stops all (${r.summary})`);
+  r = await call("delete_soundboard_sound", { sounds: ["airhorn", "boo"] });
+  r = await call("delete_soundboard_sound", { sounds: ["airhorn", "boo"], confirm_token: r.data.confirm_token });
+  check(!r.isError && /^Deleted 2 sounds\. undo_change with change_id [a-f0-9]{16} reverses it\.$/.test(r.summary) && soundList.length === 0, `delete_soundboard_sound: several under one token (${r.summary})`);
+  {
+    const soundChange = r.data.change_id;
+    writes.length = 0;
+    r = await call("undo_change", { change_id: soundChange, only: ["boo"] });
+    r = await call("undo_change", { change_id: soundChange, only: ["boo"], confirm_token: r.data.confirm_token });
+    const posted = writes.filter((w) => w.method === "POST" && w.path === `/guilds/${G}/soundboard-sounds`);
+    check(!r.isError && posted.length === 1 && posted[0].body.sound.startsWith("data:audio/mpeg;base64,") && soundList.length === 1 && soundList[0].name === "boo", `undo_change: one deleted sound back from its saved file (${r.summary})`);
+    soundList.splice(0);
+  }
+
+  const saveEmojis = emojis.splice(0);
+  emojis.push({ id: "990000000000004001", name: "old_one" }, { id: "990000000000004002", name: "old_two" }, { id: "990000000000004003", name: "taken" });
+  r = await call("update_emoji", { emoji: "old_one", renames: [{ emoji: "old_two", name: "x_two" }] });
+  check(r.isError && /not both/.test(r.summary), "update_emoji: one rename and several together are refused");
+  r = await call("update_emoji", { renames: [{ emoji: "old_one", name: "new_one" }, { emoji: "ghost", name: "new_ghost" }] });
+  check(r.isError && /^Nothing was renamed: 1 of the 2/.test(r.summary) && emojis.some((e) => e.name === "old_one"), "update_emoji: one that matches nothing stops all of them");
+  r = await call("update_emoji", { renames: [{ emoji: "old_one", name: "new_one" }, { emoji: "old_two", name: "taken" }] });
+  check(!r.isError && r.summary === "Renamed 2 emoji: :old_one: to :new_one:, :old_two: to :taken:." && emojis.map((e) => e.name).join() === "new_one,taken,taken" && /More than one emoji is now named :taken:/.test((r.warnings ?? []).join(" ")), `update_emoji: several renamed, a name now shared is said (${r.summary} | ${(r.warnings ?? []).join(" ")})`);
+  emojis.splice(0, emojis.length, ...saveEmojis);
+
+  // Several emoji uploaded together.
+  {
+    const before = emojis.length;
+    r = await call("create_emoji", { name: "x1", image_url: img("a.png"), emojis: [{ name: "x2", image_url: img("b.png") }] });
+    check(r.isError && /not both/.test(r.summary), "create_emoji: one and several together are refused");
+    r = await call("create_emoji", { emojis: [{ name: "twin", image_url: img("a.png") }, { name: "TWIN", image_url: img("b.png") }] });
+    check(r.isError && /^Nothing was uploaded\. :twin: is asked for more than once\./.test(r.summary), "create_emoji: a name asked for twice in one batch is refused");
+    r = await call("create_emoji", { emojis: [{ name: "no_picture" }] });
+    check(r.isError && /:no_picture: needs image_url or image_file, one of them/.test(r.summary), "create_emoji: an entry without a picture is refused");
+    const savedDir = process.env.DISCORD_MCP_FILES_DIR;
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcp-batch-"));
+    process.env.DISCORD_MCP_FILES_DIR = emptyDir;
+    writes.length = 0;
+    r = await call("create_emoji", { emojis: [{ name: "good_one", image_url: img("a.png") }, { name: "missing_one", image_file: "nope.png" }] });
+    check(r.isError && /^Nothing was uploaded: 1 of the 2 pictures could not be used\. :missing_one: There is no file named "nope.png"/.test(r.summary) && !writes.some((w) => w.method === "POST"), `create_emoji: one bad picture stops the batch before anything is sent (${r.summary})`);
+    process.env.DISCORD_MCP_FILES_DIR = savedDir ?? "";
+    if (savedDir === undefined) delete process.env.DISCORD_MCP_FILES_DIR;
+    fs.rmSync(emptyDir, { recursive: true, force: true });
+    const keep = emojis.splice(0);
+    for (let i = 0; i < 49; i++) emojis.push({ id: String(990000000000005000n + BigInt(i)), name: `held_${i}`, animated: false });
+    r = await call("create_emoji", { emojis: [{ name: "b1", image_url: img("a.png") }, { name: "b2", image_url: img("b.png") }] });
+    check(r.isError && /^These 2 static emoji do not fit: 49 of the 50 static slots are in use \(boost level 0\), so 1 is free\. Nothing was uploaded/.test(r.summary), `create_emoji: a batch that does not fit is said before anything is sent (${r.summary})`);
+    emojis.splice(0, emojis.length, ...keep);
+    writes.length = 0;
+    r = await call("create_emoji", { emojis: [{ name: "batch_a", image_url: img("a.png") }, { name: "batch_b", image_url: img("b.png") }, { name: "batch_moving", image_url: img("c.gif") }] });
+    check(!r.isError && /^Created 3 emoji: :batch_a: :batch_b: :batch_moving:\. undo_change with change_id [a-f0-9]{16} reverses it\.$/.test(r.summary) && writes.filter((w) => w.method === "POST").length === 3 && emojis.length === before + 3, `create_emoji: several at once (${r.summary})`);
+    const batchChange = r.data.change_id;
+    r = await call("undo_change", { change_id: batchChange });
+    r = await call("undo_change", { change_id: batchChange, confirm_token: r.data.confirm_token });
+    check(!r.isError && !emojis.some((e) => /^batch_/.test(e.name)) && emojis.length === before, `create_emoji: one undo removes the whole batch (${r.summary})`);
+  }
+
+  // Undo only part of a change: one of three deleted emoji back.
+  {
+    for (const n of ["p_one", "p_two", "p_three"]) await call("create_emoji", { name: n, image_url: img(`${n}.png`) });
+    r = await call("delete_emoji", { emojis: ["p_one", "p_two", "p_three"] });
+    r = await call("delete_emoji", { emojis: ["p_one", "p_two", "p_three"], confirm_token: r.data.confirm_token });
+    const threeGone = r.data.change_id;
+    r = await call("undo_change", { only: ["p_two"] });
+    check(r.isError && /needs change_id/.test(r.summary), "undo_change: only needs change_id");
+    r = await call("undo_change", { change_id: threeGone, only: ["p_nope"] });
+    check(r.isError && /^Nothing was undone: "p_nope" is not among the items of change [a-f0-9]{16} left to undo\. It still holds: deleted the emoji :p_one:; deleted the emoji :p_two:; deleted the emoji :p_three:\./.test(r.summary), `undo_change: a name not in the change is refused, with what it holds (${r.summary})`);
+    r = await call("undo_change", { change_id: threeGone, only: [":p_two:"] });
+    check(r.data?.executed === false && /^Safe mode: nothing was changed\. Would undo part of change [a-f0-9]{16} \(delete_emoji\) from .*: recreate 1\./.test(r.summary), `undo_change: a preview of part of a change (${r.summary})`);
+    r = await call("undo_change", { change_id: threeGone, only: [":p_two:"], confirm_token: r.data.confirm_token });
+    check(!r.isError && emojis.some((e) => e.name === "p_two") && !emojis.some((e) => e.name === "p_one" || e.name === "p_three") && /2 other item\(s\) of change [a-f0-9]{16} are not undone; undo_change with change_id [a-f0-9]{16} undoes them\./.test(r.summary), `undo_change: only that one is back, and the rest is said to be left (${r.summary})`);
+    r = await call("undo_change", { change_id: threeGone, only: ["p_two"] });
+    check(r.isError && /is not among the items/.test(r.summary), "undo_change: an item already undone cannot be picked again");
+    r = await call("undo_change", { change_id: threeGone });
+    check(r.data?.executed === false && /recreate 2/.test(r.summary), `undo_change: the rest of the change is still there to undo (${r.summary})`);
+    r = await call("undo_change", { change_id: threeGone, confirm_token: r.data.confirm_token });
+    check(!r.isError && ["p_one", "p_two", "p_three"].every((n) => emojis.some((e) => e.name === n)) && /Nothing is left to undo/.test(r.summary), "undo_change: and with it, the whole change is undone");
+    for (const n of ["p_one", "p_two", "p_three"]) emojis.splice(emojis.findIndex((e) => e.name === n), 1);
+  }
+
+  // A picture the CDN will not give: the emoji still goes, and it is said
+  // that undo cannot bring it back.
+  await call("create_emoji", { name: "no_picture", image_url: img("n.png") });
+  imagesModule.__testing.cdnBase = "http://127.0.0.1:9";
+  r = await call("delete_emoji", { emoji: "no_picture" });
+  r = await call("delete_emoji", { emoji: "no_picture", confirm_token: r.data.confirm_token });
+  imagesModule.__testing.cdnBase = `http://127.0.0.1:${imgSrv.address().port}`;
+  check(!r.isError && !emojis.some((e) => e.name === "no_picture") && /The picture of 1 emoji could not be saved, so undo_change cannot bring it back/.test((r.warnings ?? []).join(" ")), `delete_emoji: a picture that could not be saved is said up front (${(r.warnings ?? []).join(" ")})`);
+  r = await call("undo_change", { change_id: r.data.change_id });
+  check(/could not be saved when it was deleted, so it cannot be recreated/.test(JSON.stringify(r)), "undo_change: and the undo preview says so too");
+  // From the files folder, made smaller on the way.
+  {
+    const { PNG } = await import("pngjs");
+    const p = new PNG({ width: 600, height: 600 });
+    for (let i = 0; i < p.data.length; i++) p.data[i] = (i * 2654435761) >>> 24;
+    const filesRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dmcp-files-tool-"));
+    fs.writeFileSync(path.join(filesRoot, "huge_pog.png"), PNG.sync.write(p));
+    const savedDir = process.env.DISCORD_MCP_FILES_DIR;
+    process.env.DISCORD_MCP_FILES_DIR = filesRoot;
+    try {
+      writes.length = 0;
+      r = await call("create_emoji", { name: "from_file", image_file: "huge_pog.png" });
+      const posted = writes.find((w) => w.method === "POST" && w.body?.name === "from_file");
+      check(!r.isError && posted?.body.image.startsWith("data:image/png;base64,") && /\(600x600\), over the 256 KB limit, so it was made 128x128/.test((r.warnings ?? []).join(" ")), `create_emoji: from the files folder, made smaller, and said (${(r.warnings ?? []).join(" ") || r.summary})`);
+      r = await call("create_emoji", { name: "both", image_url: img("x.png"), image_file: "huge_pog.png" });
+      check(r.isError && r.summary === "Pass image_url or image_file, one of them.", "create_emoji: a link and a file together are refused");
+      r = await call("create_emoji", { name: "neither" });
+      check(r.isError && r.summary === "Pass image_url or image_file, one of them.", "create_emoji: and so is neither");
+      r = await call("create_emoji", { name: "escape", image_file: "../huge_pog.png" });
+      check(r.isError && /not inside the files folder/.test(r.summary), "create_emoji: a file outside the folder is refused");
+
+      // Role icons, the server's icon, and the bot's avatar take files too.
+      guild.features = ["ROLE_ICONS"];
+      writes.length = 0;
+      r = await call("update_role", { role: "VIP", icon_file: "huge_pog.png" });
+      const iconPatch = writes.find((w) => w.method === "PATCH" && w.path.endsWith(`/roles/${VIP}`));
+      check(!r.isError && iconPatch?.body.icon.startsWith("data:image/png;base64,") && /icon image \(the role icon was \d+ KB \(600x600\), over the 256 KB limit, so it was made 128x128/.test(r.summary), `update_role: an icon from the files folder, made smaller (${r.summary})`);
+      r = await call("update_role", { role: "VIP", icon_url: img("i.png"), icon_file: "huge_pog.png" });
+      check(r.isError && r.summary === "Pass icon_url or icon_file, one of them.", "update_role: an icon link and file together are refused");
+      r = await call("update_role", { role: "VIP", icon_file: "huge_pog.png", icon_emoji: "⭐" });
+      check(r.isError && /either an image or an emoji/.test(r.summary), "update_role: and so are a file and an emoji");
+      writes.length = 0;
+      r = await call("update_server", { icon_file: "huge_pog.png" });
+      const serverPatch = writes.find((w) => w.method === "PATCH" && w.path === `/guilds/${G}`);
+      check(!r.isError && serverPatch?.body.icon.startsWith("data:image/png;base64,") && /new icon/.test(r.summary), `update_server: the icon from the files folder (${r.summary})`);
+      r = await call("update_server", { icon_url: img("i.png"), icon_file: "huge_pog.png" });
+      check(r.isError && /Pass icon_url or icon_file, one of them/.test(r.summary), "update_server: a link and a file together are refused");
+      guild.features = [];
+    } finally {
+      if (savedDir === undefined) delete process.env.DISCORD_MCP_FILES_DIR;
+      else process.env.DISCORD_MCP_FILES_DIR = savedDir;
+      fs.rmSync(filesRoot, { recursive: true, force: true });
+    }
+  }
+
+  writes.length = 0;
+  r = await call("update_role", { role: "@everyone", color: "#000000" });
+  check(r.isError && /^Only the permissions of @everyone can change/.test(r.summary) && writes.length === 0, `update_role: @everyone takes no color (${r.summary})`);
+  // @everyone holds View Channels here. Taking it away is no grant, but
+  // every member holds the role, so it is shown first all the same.
+  r = await call("update_role", { role: "@everyone", permissions: ["send_messages"] });
+  check(r.data?.executed === false && /Would change what every member of the server may do \(the @everyone role\): can now send messages; can no longer view channel\./.test(r.summary) && writes.length === 0, `update_role: a change to @everyone is previewed, gains and losses (${r.summary})`);
+  const everyoneToken = r.data.confirm_token;
+  r = await call("update_role", { role: "@everyone", permissions: ["send_messages"], confirm_token: everyoneToken });
+  const everyonePatch = writes.find((w) => w.method === "PATCH" && w.path === `/guilds/${G}/roles/${G}`);
+  check(!r.isError && everyonePatch?.body.permissions === String(P.SendMessages), `update_role: confirmed, @everyone's permissions are set (${r.summary})`);
+  roles[0].permissions = s(P.ViewChannel);
+  r = await call("update_role", { role: "@everyone", permissions: ["view_channel", "mention_everyone"] });
+  check(r.data?.executed === false && /so that everyone can mention @everyone/.test(r.summary), `update_role: a power for @everyone goes through the grant preview (${r.summary})`);
+  // A bit no named permission covers (Discord keeps one on many servers'
+  // @everyone) stays where it is when permissions are set by name.
+  const UNNAMED = 1n << 47n;
+  roles[0].permissions = s(P.ViewChannel | P.SendMessages | UNNAMED);
+  writes.length = 0;
+  r = await call("update_role", { role: "@everyone", permissions: ["view_channel"] });
+  r = await call("update_role", { role: "@everyone", permissions: ["view_channel"], confirm_token: r.data?.confirm_token });
+  const keptPatch = writes.find((w) => w.method === "PATCH" && w.path === `/guilds/${G}/roles/${G}`);
+  check(!r.isError && keptPatch?.body.permissions === String(P.ViewChannel | UNNAMED), `update_role: a permission with no name here is kept, not dropped unseen (${keptPatch?.body.permissions})`);
+  roles[0].permissions = s(P.ViewChannel);
+  r = await call("delete_role", { role: "@everyone" });
+  check(r.isError && /^@everyone is held by every member and cannot be deleted/.test(r.summary), "delete_role: @everyone cannot be deleted, and says where its permissions change");
+  writes.length = 0;
+  r = await call("update_role", { role: "VIP", color: "#0ff" });
+  check(!r.isError && writes.some((w) => w.method === "PATCH" && w.body.color === 0x00ffff), "update_role: the short form of a hex color works");
+  roles.push({ id: "990000000000000120", name: "Twin", permissions: "0", position: 1 }, { id: "990000000000000121", name: "Twin", permissions: "0", position: 1 });
+  r = await call("update_role", { role: "Twin", color: "#123456" });
+  check(r.isError && r.summary === '2 roles match "Twin", all with the same name: "Twin" (990000000000000120), "Twin" (990000000000000121). Pass the ID of the one meant.' && r.data.candidates.length === 2, `update_role: two roles with one name are named, with their IDs (${r.summary})`);
+  r = await call("delete_role", { role: "990000000000000555" });
+  check(r.isError && r.summary === "No role in this server has the ID 990000000000000555. It may have been deleted already.", `delete_role: an ID that is gone is said to be, not "no single role" (${r.summary})`);
+  writes.length = 0;
+  r = await call("reorder_roles", { moves: [{ role: "Bot", position: 2 }] });
+  check(r.isError && /"Bot" is not below the bot's highest role, "Bot", so Discord does not let the bot move it/.test(r.summary) && writes.length === 0, `reorder_roles: a role at the bot's own level is refused before anything is sent (${r.summary})`);
+  r = await call("reorder_roles", { moves: [{ role: "VIP", position: 10 }] });
+  check(r.isError && /Position 10 is above the bot's highest role, "Bot" at position 9.*The highest it can place a role is position 9/.test(r.summary) && writes.length === 0, `reorder_roles: so is a position above it (${r.summary})`);
+  writes.length = 0;
+  r = await call("reorder_roles", { moves: [{ role: "VIP", position: 9 }] });
+  check(!r.isError && writes.some((w) => w.method === "PATCH" && w.path === `/guilds/${G}/roles`), `reorder_roles: the bot's own position number is allowed; Discord moves the role in just below (${r.summary})`);
+  r = await call("reorder_roles", { moves: [{ role: "VIP", position: 5 }] });
+  check(!r.isError && writes.some((w) => w.method === "PATCH" && w.path === `/guilds/${G}/roles`), `reorder_roles: below the bot, the move goes ahead (${r.summary})`);
 
   delete process.env.DISCORD_MCP_ALLOW_PRIVATE_URLS;
+  imagesModule.__testing.cdnBase = realCdn;
+  imagesModule.__testing.mediaBase = realMedia;
   imgSrv.close();
   if (savedData === undefined) delete process.env.DISCORD_MCP_DATA_DIR;
   else process.env.DISCORD_MCP_DATA_DIR = savedData;
@@ -8061,6 +8585,25 @@ try {
   check(/Other servers are unchanged/.test(r.summary), "bot profile: it says other servers are unchanged");
   r = await call({ nickname: "none", avatar_url: "none", banner_url: "none", bio: "none" });
   check(!r.isError && writes[0].body.nick === null && writes[0].body.avatar === null && writes[0].body.banner === null && writes[0].body.bio === null, "bot profile: none removes the server-only look");
+  {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "dmcp-avatar-"));
+    fs.writeFileSync(path.join(folder, "me.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64"));
+    const savedDir = process.env.DISCORD_MCP_FILES_DIR;
+    process.env.DISCORD_MCP_FILES_DIR = folder;
+    try {
+      r = await call({ avatar_file: "me.png" });
+      check(!r.isError && writes[0].body.avatar?.startsWith("data:image/png;base64,"), "bot profile: an avatar from the files folder");
+      r = await call({ avatar_url: url, avatar_file: "me.png" });
+      check(r.isError && /Pass avatar_url or avatar_file, one of them/.test(r.summary) && writes.length === 0, "bot profile: a link and a file together are refused");
+    } finally {
+      if (savedDir === undefined) delete process.env.DISCORD_MCP_FILES_DIR;
+      else process.env.DISCORD_MCP_FILES_DIR = savedDir;
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
+  }
   r = await call({ scope: "everywhere", username: "newname", avatar_url: url });
   check(!r.isError && writes[0].method === "PATCH" && writes[0].path === "/users/@me" && writes[0].body.username === "newname" && writes[0].body.avatar.startsWith("data:"), "bot profile: everywhere changes the bot's own user");
   r = await call({ scope: "everywhere", bio: "x" });
@@ -9329,6 +9872,21 @@ try {
   check(r.isError && /The bot's own profile shows in every server it is in/.test(r.summary) && writes.length === 0, "allowed servers: so is the bot's own profile");
 
   check(JSON.stringify(restrictionLines({})) === "[]", "setup check: no restriction, no settings lines");
+  {
+    const { filesFolderReport } = await import("../dist/tools/diagnostics.js");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    check(JSON.stringify(filesFolderReport(undefined)) === "{}", "setup check: no files folder set, nothing said about one");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dmcp-files-check-"));
+    fs.mkdirSync(path.join(dir, "sub"));
+    for (const n of ["a.png", "b.JPG", "sub/c.gif", "d.mp3", "notes.txt", "apng"]) fs.writeFileSync(path.join(dir, n), "x");
+    const rep = filesFolderReport(dir);
+    check(rep.check === undefined && rep.line === `Files folder (DISCORD_MCP_FILES_DIR): ${dir}, with 3 pictures and 1 sound that emoji, stickers, sounds, role icons, and server or bot pictures can be uploaded from.`, `setup check: the files folder and what it holds (${rep.line})`);
+    const gone = filesFolderReport(path.join(dir, "missing"));
+    check(gone.line === undefined && gone.check?.status === "warn" && /does not exist or is not a folder/.test(gone.check.detail), "setup check: a files folder that is not there is a warning");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   const both = restrictionLines({ readOnly: true, allowedServers: new Set([ALPHA, BETA]) });
   check(both.length === 2 && both[0].startsWith("Read-only (DISCORD_MCP_READ_ONLY)") && both[1] === "Acts only in 2 servers (DISCORD_MCP_ALLOWED_SERVERS).", "setup check: one plain line per restriction");
   const noBot = { bots: [], toolsets: {}, readOnly: true, allowedServers: new Set([ALPHA]) };
@@ -9521,7 +10079,7 @@ try {
 
 // --- usage stats: the switch, the classes, the bands ---
 {
-  const { usageSwitch, usageLine, errorClass, appName } = await import("../dist/usageStats.js");
+  const { usageSwitch, usageLine, errorClass, appName, ERROR_CLASSES } = await import("../dist/usageStats.js");
   const { countBand, botsBand, serversBand, sizeBand, ageBand, installKind, runContext, osName, firstFlags, backoffMs } = await import("../dist/usageReport.js");
   const on = (env, installed = true) => usageSwitch(env, installed);
   check(on({}).on === true, "usage: an installed copy has them on by default");
@@ -9584,6 +10142,64 @@ try {
   check(cls('No single role matches "mods".') === "not_found" && cls('No configured bot is in a server matching "x".') === "not_found" && cls('"Beta" is not one of the servers this install may act in') === "not_found", "usage: things not found");
   check(cls("Could not reach Discord: the connection timed out") === "network", "usage: network");
   check(cls("Something else entirely.") === "other", "usage: anything else");
+  // Messages as live runs against Discord produced them (2026-11-24), and
+  // the class each belongs in. Before, most of these were "other", and a
+  // link answering 404 counted as a network failure.
+  const seen = [
+    ["Discord is holding further POST requests to /guilds/:id/emojis for about 54 minutes (until 12:17 UTC). Nothing was done. Try again after that.", { rate_limited: true }, "rate_limited"],
+    ["Only http and https URLs can be fetched. Files on this computer are never read, so a file has to be at a public link first.", {}, "file"],
+    ["Only http and https URLs can be fetched, not data.", {}, "file"],
+    ["Refused to fetch from localhost: it is a private or local network address. Only public internet URLs are fetched, because whatever is fetched gets posted to Discord. If this setup serves its own files from a private address on purpose, set DISCORD_MCP_ALLOW_PRIVATE_URLS=true.", {}, "file"],
+    ["The link answered 404 (not found), so there was nothing to fetch from cdn.discordapp.com/attachments/1/2/fire.png. Discord attachment links stop working after about a day; get a fresh link to the file.", {}, "file"],
+    ['Unsupported image type "text/html". Allowed: image/png, image/jpeg, image/gif, image/webp. That link is a web page, not the file itself: use the file\'s direct link, the one that opens just the file in a browser.', {}, "file"],
+    ["Could not fetch https://no-such-host.invalid/fire.png: no site answers to that name.", {}, "file"],
+    ["The image is 1371 KB; the limit here is 256 KB.", {}, "file"],
+    ["The image is empty.", {}, "file"],
+    ["Fetching 127.0.0.1:5000 took longer than 30 seconds.", {}, "file"],
+    ["Fetching https://x.example/loop redirected more than 5 times.", {}, "file"],
+    ['"Orygn" is managed by an integration and cannot be changed manually.', {}, "hierarchy"],
+    ['"Orygn" is managed by an integration and cannot be assigned manually.', {}, "hierarchy"],
+    ['The bot\'s highest role (position 3) is below "Admin" (position 9). Discord will reject this. Move the bot\'s role above the target role.', {}, "hierarchy"],
+    ['Position 10 is above the bot\'s highest role, "Orygn" at position 3, so Discord does not let the bot move a role there. The highest it can place a role is position 3. Nothing was changed.', {}, "hierarchy"],
+    ["Gradient and holographic role colors need the Enhanced Role Colors feature, which this server does not have.", {}, "server_limit"],
+    ["Role icons need boost level 2 (the Role Icons feature), which this server does not have.", {}, "server_limit"],
+    ["This server cannot have a banner (it needs boost level 2). Nothing was changed.", {}, "server_limit"],
+    ["Discord API error 400: Maximum number of emojis reached (50)", { discord_error: { code: 30008, status: 400 } }, "server_limit"],
+    ["Discord API error 400: Invalid Form Body", { discord_error: { code: 50035, status: 400 } }, "validation"],
+    ["Discord API error 400: Missing Permissions", { discord_error: { code: 50013, status: 400 } }, "permission"],
+    ["Discord API error 404: Unknown Emoji", { discord_error: { code: 10014, status: 404 } }, "not_found"],
+    ["Discord API error 500: Internal Server Error", { discord_error: { code: 0, status: 500 } }, "discord_error"],
+    ['"red" is not a hex color. Use the form #5865f2.', {}, "validation"],
+    ["Pass at least one field to change.", {}, "validation"],
+    ["Unknown permission name(s): manage_everything.", {}, "validation"],
+    ["Input validation error: Invalid arguments for tool create_emoji: image_url: Invalid URL", {}, "validation"],
+    ["@everyone is held by every member and cannot be deleted. Its permissions change with update_role (role \"@everyone\"), or per channel with set_channel_permissions.", {}, "validation"],
+    ["Only the permissions of @everyone can change: it has no name, color, icon, or place in the member list of its own. Nothing was changed.", {}, "validation"],
+    ["That confirm_token expired, so nothing was changed: a token works for 2 minutes after its preview. Call the tool again without a token to get a fresh preview. For several actions, confirm each one soon after its own preview.", {}, "confirm"],
+    ["That confirm_token was already used, so nothing more was changed: each token works once. Call the tool again without a token to get a fresh preview.", {}, "confirm"],
+    ["That confirm_token was issued for a different action, so nothing was changed. A token covers only the exact action its preview showed: call the tool again without a token, with the same arguments, for a preview of this one.", {}, "confirm"],
+    ['2 roles match "uk-test-b", all with the same name: "uk-test-b" (1574746881152524381), "uk-test-b" (1574746882905870467). Pass the ID of the one meant.', { candidates: [{}, {}] }, "ambiguous"],
+    ['Multiple channels match "general". Pick one by ID.', {}, "ambiguous"],
+    ['No single role matches "uk-no-such-role".', { candidates: [] }, "not_found"],
+    ["No role in this server has the ID 1574754974016208909. It may have been deleted already.", { candidates: [] }, "not_found"],
+    ['"../secrets.png" is not inside the files folder, and only that folder is read.', {}, "file"],
+    ["Files on this computer are read only from a folder chosen for it, and none is set. To allow it, set DISCORD_MCP_FILES_DIR to that folder and put the file there; otherwise give a public link to the file.", {}, "file"],
+    ['There is no file named "pog.png" in the files folder (C:\\x).', {}, "file"],
+    ["The image is over the 256 KB limit, and only a still png or jpeg can be made smaller here; this one is a gif. Use a smaller file.", {}, "file"],
+    ["The image is 5000x5000, larger than the 4096x4096 this can make smaller. Use a smaller file.", {}, "file"],
+    ['Nothing was deleted: 1 of the 3 names did not pick out one emoji. No single emoji matches "nope".', {}, "not_found"],
+    ["Pass image_url or image_file, one of them.", {}, "validation"],
+    ["Discord refused access (403). The bot is missing a permission for this, or cannot see the channel. Check the bot's role and the channel's permission overrides.", { discord_error: { code: 50001, status: 403 } }, "permission"],
+    ["Could not reach Discord: the connection timed out at the network level before any API was involved. This is usually transient local network or routing trouble; retrying the same call typically works.", { network_error: true }, "network"],
+    ["Discord rejected the bot token (401). Reset it in the Developer Portal and update DISCORD_TOKEN.", {}, "no_token"],
+  ];
+  for (const [summary, data, want] of seen) check(cls(summary, data) === want, `usage: "${summary.slice(0, 60)}..." counts as ${want} (${cls(summary, data)})`);
+  check(ERROR_CLASSES.length === new Set(ERROR_CLASSES).size && seen.every(([, , want]) => ERROR_CLASSES.includes(want)), "usage: every class used is one the list has");
+  {
+    const { countedFailure } = await import("../dist/server.js");
+    const refused = { isError: true, content: [{ type: "text", text: JSON.stringify({ summary: "Role icons need boost level 2 (the Role Icons feature), which this server does not have.", data: {} }) }] };
+    check(countedFailure({ role: "Admin", icon_emoji: "🛡️" }, refused)?.summary.startsWith("Role icons need") && countedFailure({ role: "Admin", icon_emoji: "🛡️", dry_run: true }, refused) === undefined && countedFailure({ dry_run: true }, { isError: false, content: [] }) === undefined, "usage: a refused dry run is the AI checking what is possible, not a failure");
+  }
 
   const apps = [["local-agent-mode-Discord MCP", "claude-desktop"], ["local-agent-mode-Cursor helper", "claude-desktop"], ["custom3p-main", "claude-desktop"], ["claude-ai", "claude-desktop"], ["claude-code", "claude-code"], ["Visual Studio Code", "vscode"], ["cursor-vscode", "cursor"], ["Roo Code", "roo-code"], ["Cline", "cline"], ["codex-mcp-client", "codex"], ["Zed", "zed"], ["goose", "goose"], ["Windsurf", "windsurf"], ["some-new-app", "other"], [undefined, "unknown"], ["  ", "unknown"]];
   for (const [given, want] of apps) check(appName(given) === want, `usage: the app "${given}" is counted as ${want} (${appName(given)})`);
@@ -9649,7 +10265,7 @@ try {
     // Yesterday, from two processes, written well over a minute ago.
     fs.mkdirSync(usage, { recursive: true });
     const old = (Date.now() - 5 * 60_000) / 1000;
-    fs.writeFileSync(path.join(usage, `day-${yesterday}-111-aaaaaa.json`), JSON.stringify({ tools: { send_message: 8, read_messages: 3 }, gate: { preview: 2 }, errors: { permission: 1 }, apps: ["claude-desktop"] }));
+    fs.writeFileSync(path.join(usage, `day-${yesterday}-111-aaaaaa.json`), JSON.stringify({ tools: { send_message: 8, read_messages: 3 }, failed: { send_message: 1 }, gate: { preview: 2 }, errors: { permission: 1 }, apps: ["claude-desktop"] }));
     fs.writeFileSync(path.join(usage, `day-${yesterday}-222-bbbbbb.json`), JSON.stringify({ tools: { send_message: 4 }, gate: { preview: 1, confirmed: 1 }, errors: {}, apps: ["cursor"] }));
     for (const n of fs.readdirSync(usage)) fs.utimesSync(path.join(usage, n), old, old);
 
@@ -9661,6 +10277,10 @@ try {
     stats.noteToolCall("list_channels", { summary: "The bot is missing the View Channel permission.", data: {} });
     await tick();
     check(sent.length === 0, "usage: nor on a call that failed");
+    stats.flush();
+    const todayFile = fs.readdirSync(usage).find((n) => n.startsWith(`day-${today}`));
+    const todayTally = JSON.parse(fs.readFileSync(path.join(usage, todayFile), "utf8"));
+    check(todayTally.failed?.list_channels === 1 && todayTally.errors?.permission === 1 && todayTally.tools?.list_channels === 1, `usage: a failed call is counted under its tool as well as its kind (${JSON.stringify(todayTally)})`);
     stats.noteToolCall("list_channels", undefined);
     for (let i = 0; i < 20 && sent.length === 0; i += 1) await tick();
     await new Promise((r) => setTimeout(r, 50));
@@ -9670,7 +10290,7 @@ try {
     check(r.s === 1 && r.day === today && /^[0-9a-f]{32}$/.test(r.nonce) && r.app === "claude-desktop" && r.install === "source" && r.bots === "1" && r.servers === "2-5" && r.largest === "50-500" && r.age === "0", "usage: with these values");
     check(r.first?.week === true && r.first.month === true && r.first.ever === true, "usage: and today as the install's first day");
     const y = r.days?.[0];
-    check(r.days?.length === 1 && y.d === yesterday && y.tools.send_message === "10-99" && y.tools.read_messages === "1-9" && y.gate.preview === "1-9" && y.gate.confirmed === "1-9" && y.errors.permission === "1-9" && y.apps.sort().join() === "claude-desktop,cursor", `usage: yesterday's counts, added up across processes and banded (${JSON.stringify(y)})`);
+    check(r.days?.length === 1 && y.d === yesterday && y.tools.send_message === "10-99" && y.tools.read_messages === "1-9" && y.gate.preview === "1-9" && y.gate.confirmed === "1-9" && y.errors.permission === "1-9" && JSON.stringify(y.failed) === JSON.stringify({ send_message: "1-9" }) && y.apps.sort().join() === "claude-desktop,cursor", `usage: yesterday's counts, added up across processes and banded (${JSON.stringify(y)})`);
     check(!fs.readdirSync(usage).some((n) => n.startsWith(`day-${yesterday}`)), "usage: and once the receiver took them, they are gone");
     // The report number is random hex, which now and then holds 17 digits in
     // a row, so it is left out of the look for an id.

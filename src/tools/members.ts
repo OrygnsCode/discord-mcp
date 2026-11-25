@@ -12,7 +12,7 @@ import {
   ALL_PERMISSIONS,
 } from "../discord/preflight.js";
 import { voiceMembersIn, hasGuildVoiceData } from "../discord/voiceState.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import { ok, fail } from "../envelope.js";
 import { gateDestructive } from "../safety.js";
 import { quoted } from "../discord/names.js";
@@ -314,7 +314,7 @@ export function registerMemberTools(
         roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single role matches "${role}".`, {
+        return fail(noSingleMatch("role", "roles", role, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }

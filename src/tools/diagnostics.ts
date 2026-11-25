@@ -23,6 +23,8 @@ import { rateLimitStats } from "../discord/rateLimit.js";
 import { growthChecks } from "../discord/thresholds.js";
 import { SERVER_INFO } from "../identity.js";
 import { LEGACY_PREFIX, PREFIX, legacySettingsInUse, settingSource } from "../settings.js";
+import { filesDir } from "../discord/localFiles.js";
+import { readdirSync, statSync } from "node:fs";
 import { RELEASES_URL, availableUpdate, updateSteps } from "../updateCheck.js";
 import { confirmMode, safeModeEnabled, unknownConfirmMode } from "../safety.js";
 import { appCanShowDialog } from "../requestContext.js";
@@ -507,10 +509,44 @@ export function restrictionLines(config: Pick<ServerConfig, "readOnly" | "allowe
   return lines;
 }
 
+// The files folder (DISCORD_MCP_FILES_DIR), when one is set: where it is
+// and what it holds, or a warning when it is not there. Uploads from it are
+// the first thing to fail when it is wrong, so this is where to look.
+const PICTURE = /\.(png|jpe?g|gif|webp)$/i;
+const SOUND = /\.(mp3|ogg)$/i;
+export function filesFolderReport(dir: string | undefined = filesDir()): { line?: string; check?: SetupCheck } {
+  if (!dir) return {};
+  const where = packagedAs() === "mcpb" ? "the Files folder setting" : settingSource("FILES_DIR");
+  let names: string[];
+  try {
+    if (!statSync(dir).isDirectory()) throw new Error("not a folder");
+    names = readdirSync(dir, { recursive: true }).map(String).slice(0, 5000);
+  } catch {
+    return {
+      check: {
+        check: "files_folder",
+        status: "warn",
+        detail: `The files folder in ${where} does not exist or is not a folder: ${dir}. Uploads by file name will fail.`,
+        fix: "Point it at a folder that exists, or clear it.",
+      },
+    };
+  }
+  const pictures = names.filter((n) => PICTURE.test(n)).length;
+  const sounds = names.filter((n) => SOUND.test(n)).length;
+  return {
+    line:
+      `Files folder (${where}): ${dir}, with ${pictures} picture${pictures === 1 ? "" : "s"} and ${sounds} sound${sounds === 1 ? "" : "s"} ` +
+      "that emoji, stickers, sounds, role icons, and server or bot pictures can be uploaded from.",
+  };
+}
+
 function finishChecks(checks: SetupCheck[], config: ServerConfig) {
+  // The files folder, when set: a plain line, or a warning when it is wrong.
+  const files = filesFolderReport();
+  if (files.check) checks.push(files.check);
   // The usage stats line is here and not in get_bot_info: this is where
   // someone, or their AI, looks to see what the install does.
-  const settings = [...restrictionLines(config), usageLine()];
+  const settings = [...restrictionLines(config), ...(files.line ? [files.line] : []), usageLine()];
   const fails = checks.filter((c) => c.status === "fail");
   const warns = checks.filter((c) => c.status === "warn");
   const passes = checks.length - fails.length - warns.length;

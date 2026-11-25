@@ -10,7 +10,7 @@ import { getRoles } from "../discord/guildData.js";
 import { getRestForToken, NoTokenError } from "../discord/client.js";
 import { chooseSharedBot } from "../discord/botRouting.js";
 import { quoted } from "../discord/names.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import { ok, fail } from "../envelope.js";
 import { settingSource } from "../settings.js";
 import { enter, guarded, guildParam, memberDisplayName } from "./common.js";
@@ -193,7 +193,7 @@ export function registerRosterTools(
         roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single role matches "${role}".`, {
+        return fail(noSingleMatch("role", "roles", role, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }

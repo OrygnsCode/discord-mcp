@@ -1,6 +1,6 @@
 {
   "name": "@orygn/discord-mcp",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Discord server management MCP for AI agents: chat, moderation, admin, and full server building. Formerly Omnicord.",
   "type": "module",
   "license": "Apache-2.0",
@@ -55,11 +55,14 @@
     "@modelcontextprotocol/server": "^2.4.0",
     "discord-api-types": "^0.38.58",
     "dotenv": "^17.2.1",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^24.19.2",
+    "@types/pngjs": "^6.0.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },

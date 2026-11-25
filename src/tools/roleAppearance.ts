@@ -3,7 +3,7 @@ import { Routes } from "discord-api-types/v10";
 import type { APIGuild, APIRole } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
 import { resolveEmojiInput } from "../discord/emoji.js";
-import { fetchImageAsDataUri, MAX_EMOJI_BYTES } from "../discord/images.js";
+import { IMAGE_TYPES, loadAsset, MAX_EMOJI_BYTES, toDataUri } from "../discord/images.js";
 import { parseHexColor } from "./common.js";
 
 // How a role looks beyond its single color: a gradient or Discord's
@@ -22,6 +22,8 @@ export const roleAppearanceFields = {
     .describe("Discord's holographic style, which uses its own three colors; false for a solid color. Needs the Enhanced Role Colors server feature."),
   icon_url: z.string().optional()
     .describe("Public URL of a small image (png, jpeg, webp; 256 KB) shown beside members' names, or none to remove. Needs boost level 2."),
+  icon_file: z.string().min(1).optional()
+    .describe("The icon image from the local files folder (DISCORD_MCP_FILES_DIR), by name, instead of icon_url. Needs boost level 2."),
   icon_emoji: z.string().optional()
     .describe("A standard emoji shown beside members' names instead of an image, or none to remove. Needs boost level 2."),
 };
@@ -31,11 +33,12 @@ export type RoleAppearanceInput = {
   secondary_color?: string;
   holographic?: boolean;
   icon_url?: string;
+  icon_file?: string;
   icon_emoji?: string;
 };
 
 export function hasRoleAppearance(input: RoleAppearanceInput): boolean {
-  return [input.secondary_color, input.holographic, input.icon_url, input.icon_emoji].some((v) => v !== undefined);
+  return [input.secondary_color, input.holographic, input.icon_url, input.icon_file, input.icon_emoji].some((v) => v !== undefined);
 }
 
 const isNone = (v: string) => /^none$/i.test(v.trim());
@@ -55,8 +58,12 @@ export async function roleAppearanceBody(
   if (input.holographic === true && (input.color !== undefined || input.secondary_color !== undefined)) {
     return { ok: false, reason: "holographic uses Discord's own three colors, so it cannot be combined with color or secondary_color." };
   }
-  if (input.icon_url !== undefined && input.icon_emoji !== undefined && !isNone(input.icon_url) && !isNone(input.icon_emoji)) {
-    return { ok: false, reason: "A role shows either an image or an emoji as its icon, not both. Pass one of icon_url or icon_emoji." };
+  if (input.icon_url !== undefined && input.icon_file !== undefined) {
+    return { ok: false, reason: "Pass icon_url or icon_file, one of them." };
+  }
+  const iconImage = input.icon_url ?? input.icon_file;
+  if (iconImage !== undefined && input.icon_emoji !== undefined && !isNone(iconImage) && !isNone(input.icon_emoji)) {
+    return { ok: false, reason: "A role shows either an image or an emoji as its icon, not both. Pass one of icon_url, icon_file, or icon_emoji." };
   }
   const guild = (await rest.get(Routes.guild(guildId))) as APIGuild;
   const has = (f: string) => (guild.features as string[]).includes(f);
@@ -81,21 +88,24 @@ export async function roleAppearanceBody(
     setsColors = true;
   }
 
-  const wantsIcon = (input.icon_url !== undefined && !isNone(input.icon_url)) || (input.icon_emoji !== undefined && !isNone(input.icon_emoji));
+  const wantsIcon =
+    (input.icon_url !== undefined && !isNone(input.icon_url)) ||
+    input.icon_file !== undefined ||
+    (input.icon_emoji !== undefined && !isNone(input.icon_emoji));
   if (wantsIcon && !has("ROLE_ICONS")) {
     return { ok: false, reason: "Role icons need boost level 2 (the Role Icons feature), which this server does not have." };
   }
-  if (input.icon_url !== undefined) {
-    if (isNone(input.icon_url)) {
-      body.icon = null;
-      changes.push("icon image removed");
-    } else {
-      const image = await fetchImageAsDataUri(input.icon_url, MAX_EMOJI_BYTES);
-      if (!image.ok) return { ok: false, reason: `The role icon: ${image.error}` };
-      body.icon = image.dataUri;
-      body.unicode_emoji = null;
-      changes.push("icon image");
-    }
+  if (input.icon_url !== undefined && isNone(input.icon_url)) {
+    body.icon = null;
+    changes.push("icon image removed");
+  } else if (input.icon_url !== undefined || input.icon_file !== undefined) {
+    // Discord takes role icons up to 256 KB, like emoji; a bigger still png
+    // or jpeg is made smaller, as an emoji is.
+    const image = await loadAsset({ url: input.icon_url, file: input.icon_file }, MAX_EMOJI_BYTES, IMAGE_TYPES, "role icon", 128);
+    if (!image.ok) return { ok: false, reason: `The role icon: ${image.error}` };
+    body.icon = toDataUri(image.contentType, image.data);
+    body.unicode_emoji = null;
+    changes.push(image.note ? `icon image (${image.note.replace(/^The /, "the ").replace(/\.$/, "")})` : "icon image");
   }
   if (input.icon_emoji !== undefined) {
     if (isNone(input.icon_emoji)) {

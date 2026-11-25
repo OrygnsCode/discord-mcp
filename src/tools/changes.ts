@@ -20,7 +20,7 @@ import {
   type BuildRecord,
   type RecordEntry,
 } from "../builder/records.js";
-import { executeUndo, planInOrder, planUndo, type UndoLive } from "../builder/undo.js";
+import { executeUndo, isFinished, planInOrder, planUndo, type UndoLive } from "../builder/undo.js";
 import {
   getBotUser,
   getChannels,
@@ -35,10 +35,11 @@ import { enter, guarded, guildParam, confirmTokenParam } from "./common.js";
 
 // Change history and undo. Every change to a server's structure made
 // through discord-mcp leaves a record (see builder/records.ts): a build,
-// and each single create, edit, or delete of a channel or role, a
-// permission edit, a role given or taken, a server settings edit. These
-// tools list the records and reverse one, whichever tool made it, so "undo
-// that" works without the AI having to rebuild anything from memory.
+// and each single create, edit, or delete of a channel or role, an emoji,
+// sticker, or sound created or deleted, a permission edit, a role given or taken, a server
+// settings edit. These tools list the records and reverse one, whichever
+// tool made it, so "undo that" works without the AI having to rebuild
+// anything from memory.
 
 const UNDO_TOKEN_TTL_MS = 10 * 60_000;
 
@@ -143,6 +144,23 @@ async function undoLive(rest: REST, guildId: string, records: BuildRecord[]): Pr
     rest.get(Routes.guild(guildId)) as Promise<APIGuild>,
   ]);
   const member = (await rest.get(Routes.guildMember(guildId, botUser.id))) as APIGuildMember;
+  // Emoji, stickers, and sounds, each only when a change being undone has
+  // that kind in it.
+  const has = (kind: string) => records.some((r) => r.entries.some((e) => e.op !== "member_role" && e.kind === kind));
+  const emojis = has("emoji")
+    ? ((await rest.get(Routes.guildEmojis(guildId))) as Array<{ id: string | null; name: string | null }>)
+        .filter((x): x is { id: string; name: string | null } => Boolean(x.id))
+        .map((x) => ({ id: x.id, name: x.name ?? "" }))
+    : undefined;
+  const stickers = has("sticker")
+    ? ((await rest.get(Routes.guildStickers(guildId))) as Array<{ id: string; name: string }>).map((x) => ({ id: x.id, name: x.name }))
+    : undefined;
+  const sounds = has("sound")
+    ? (((await rest.get(Routes.guildSoundboardSounds(guildId))) as { items?: Array<{ sound_id: string; name: string }> }).items ?? []).map((x) => ({
+        id: x.sound_id,
+        name: x.name,
+      }))
+    : undefined;
   let roleMemberCounts: Record<string, number> | undefined;
   try {
     roleMemberCounts = (await rest.get(Routes.guildRoleMemberCounts(guildId))) as Record<string, number>;
@@ -175,6 +193,9 @@ async function undoLive(rest: REST, guildId: string, records: BuildRecord[]): Pr
     },
     guild: guild as unknown as Record<string, unknown>,
     memberRoles,
+    ...(emojis ? { emojis } : {}),
+    ...(stickers ? { stickers } : {}),
+    ...(sounds ? { sounds } : {}),
     aliases: loadAliases(guildId),
     botTop: highestRolePosition(member.roles, roles),
     roleMemberCounts,
@@ -220,7 +241,8 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       title: "Undo change",
       description:
         "Undo changes made through discord-mcp, from their records: builds, " +
-        "and any single create, edit, or delete of a channel or role, " +
+        "any single create, edit, or delete of a channel or role, an emoji, " +
+        "sticker, or sound created or deleted (its file is saved first), " +
         "permission edit, role given or taken, server settings edit. Use this " +
         "rather than redoing things by hand: it has an exact copy of what was " +
         "there. It deletes what a change created, puts back what it changed, " +
@@ -233,21 +255,27 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
         "With none, the latest change not yet undone. The first call changes " +
         "nothing and returns every step plus a confirm_token; repeat with the " +
         "token to run it. If a step fails (a rate limit, say), calling it " +
-        "again finishes the rest.",
+        "again finishes the rest. With change_id, only picks some of its " +
+        "items, such as one of several deleted emoji; the rest can be undone later.",
       inputSchema: {
         guild: guildParam,
         change_id: z.string().optional().describe("One change, from list_changes or the tool that made it."),
         since: z.string().optional().describe("ISO date-time: undo every change made at or after it."),
         change_ids: z.array(z.string()).max(50).optional().describe("Several changes."),
+        only: z.array(z.string()).min(1).max(250).optional()
+          .describe("With change_id: undo only these of its items, by name or id as the preview shows them."),
         dry_run: z.boolean().optional(),
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
-    guarded(async ({ guild, change_id, since, change_ids, dry_run, confirm_token }) => {
+    guarded(async ({ guild, change_id, since, change_ids, only, dry_run, confirm_token }) => {
       const { rest, guildId } = await enter(config, guild);
       if ([change_id, since, change_ids].filter((x) => x !== undefined).length > 1) {
         return fail("Pass one of change_id, since, or change_ids.");
+      }
+      if (only !== undefined && change_id === undefined) {
+        return fail("only picks items of one change, so it needs change_id.");
       }
 
       // Which changes, newest first.
@@ -281,11 +309,19 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       }
       records.sort((a, b) => b.createdAt - a.createdAt);
 
+      // Some items of the change, when only is given.
+      let selected: Set<number> | undefined;
+      if (only !== undefined) {
+        const picked = pickEntries(records[0], only);
+        if (!picked.ok) return fail(picked.error);
+        selected = picked.entries;
+      }
+
       // The preview: each change's steps against the server as undoing the
       // newer ones leaves it (see planInOrder). Each is checked again against
       // the real server when its turn comes.
       let live = await undoLive(rest, guildId, records);
-      const previews = await planInOrder(guildId, records, live);
+      const previews = await planInOrder(guildId, records, live, selected);
       // What the confirmation covers: these steps, as worded. The plan is
       // made again when the confirmed call arrives, and a server that moved
       // in between (a role to delete gained members, a channel gained
@@ -305,7 +341,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       const when = (r: BuildRecord) => new Date(r.createdAt).toISOString().replace("T", " ").slice(0, 16) + " UTC";
       const label =
         records.length === 1
-          ? `change ${records[0].buildId}${records[0].tool ? ` (${records[0].tool})` : ""} from ${when(records[0])}`
+          ? `${selected ? "part of " : ""}change ${records[0].buildId}${records[0].tool ? ` (${records[0].tool})` : ""} from ${when(records[0])}`
           : `${records.length} changes, newest first, from ${when(records[records.length - 1])} to ${when(records[0])}`;
 
       const counts = [
@@ -317,7 +353,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       if (anything) {
         const gate = gateDestructive({
           tool: "undo_change",
-          args: { changes: records.map((r) => r.buildId), guild: guildId, plan: planKey },
+          args: { changes: records.map((r) => r.buildId), guild: guildId, plan: planKey, only: selected ? [...selected].sort((a, b) => a - b) : null },
           dryRun: dry_run,
           confirmToken: confirm_token,
           previewSummary:
@@ -370,7 +406,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
               live = await undoLive(rest, guildId, records);
             }
             record = current;
-            const actions = planUndo(record, live);
+            const actions = planUndo(record, live).filter((a) => !selected || selected.has(a.entry));
             results = await executeUndo(rest, guildId, record, actions, live, writeRecord, (oldId, newId) =>
               saveAlias(guildId, oldId, newId)
             );
@@ -411,15 +447,53 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       const done = outcome.flatMap((o) => o.results).filter((r) => r.status === "done").length;
       const skipped = outcome.flatMap((o) => o.results).filter((r) => r.status === "skipped").length;
       const left = records.length - outcome.length + (stoppedAt && !busy ? 1 : 0);
+      // Part of a change: say what is still recorded, rather than "nothing left".
+      const after = selected && !stoppedAt ? getRecord(guildId, records[0].buildId) : undefined;
+      const restLeft = after && !after.undoneAt ? after.entries.filter((e) => !isFinished(e)).length : 0;
       return ok(
         `Undid ${records.length === 1 ? `change ${records[0].buildId}` : `${outcome.length - (stoppedAt ? 1 : 0)} of ${records.length} changes`}: ` +
           `${done} step(s) done, ${skipped} left as they were` +
           (stoppedAt
             ? `. Stopped at change ${stoppedAt}${busy ? "" : " after a failed step"}; ${left} change(s) are left. Call undo_change the same way again to finish.`
-            : ". Nothing is left to undo."),
+            : restLeft > 0
+              ? `. ${restLeft} other item(s) of change ${records[0].buildId} are not undone; undo_change with change_id ${records[0].buildId} undoes them.`
+              : ". Nothing is left to undo."),
         { changes: outcome },
         failures
       );
     })
   );
+}
+
+// The entries of a change that names in only point at: an item's id, its
+// name (an emoji with or without its colons, a channel with or without #),
+// or for a role given or taken, the role or the member. Entries already
+// undone are left out, and a name that points at nothing left is refused
+// with what the change still holds.
+function pickEntries(record: BuildRecord, names: string[]): { ok: true; entries: Set<number> } | { ok: false; error: string } {
+  const norm = (s: string) => s.trim().replace(/^[:#@]+|:+$/g, "").toLowerCase();
+  const keys = (e: RecordEntry): string[] =>
+    e.op === "member_role"
+      ? [e.role, e.name, e.member, e.memberName]
+      : [e.id, e.name];
+  const open = record.entries.map((e, i) => ({ e, i })).filter(({ e }) => !isFinished(e));
+  const entries = new Set<number>();
+  const unknown: string[] = [];
+  for (const name of names) {
+    const hits = open.filter(({ e }) => keys(e).some((k) => k !== undefined && norm(String(k)) === norm(name)));
+    if (hits.length === 0) unknown.push(name);
+    for (const { i } of hits) entries.add(i);
+  }
+  if (unknown.length > 0) {
+    const items = open.map(({ e }) => describeEntry(e));
+    return {
+      ok: false,
+      error:
+        `Nothing was undone: ${unknown.map((u) => quoted(u)).join(", ")} ${unknown.length === 1 ? "is" : "are"} not among the items of change ${record.buildId} left to undo. ` +
+        (items.length > 0
+          ? `It still holds: ${items.slice(0, 20).join("; ")}${items.length > 20 ? `; and ${items.length - 20} more` : ""}.`
+          : "Everything in it has been undone already."),
+    };
+  }
+  return { ok: true, entries };
 }

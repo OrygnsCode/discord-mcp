@@ -52,9 +52,9 @@ And for each of the last few days it was used (up to seven):
 
 | Field | Values |
 |---|---|
-| Tools | Each tool called that day, with how often: `1-9`, `10-99`, or `100+`. |
-| Confirmations | How many previews were shown, confirmed, and declined, in the same bands. |
-| Errors | Failed calls by kind (missing permission, intents off, rate limited, not found, invalid parameters, no token, network, other), in the same bands. |
+| Tools | Each tool called that day, with how often, and how often it failed: `1-9`, `10-99`, or `100+`. |
+| Confirmations | How many previews were shown, confirmed, declined, and confirmed too late, in the same bands. |
+| Errors | Failed calls by kind (missing permission, a role the bot ranks below, intents off, rate limited, not found, a name more than one thing has, invalid parameters, a server limit or missing boost, a file or link that did not work, an expired or used confirmation, no token, network, an error from Discord, other), in the same bands. |
 | AI apps | Which apps from the fixed list were used that day. |
 
 ### What the setup wizard's report holds

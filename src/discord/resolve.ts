@@ -6,6 +6,8 @@
 // ignored), prefix, substring. When the winner is not clear the caller
 // gets candidates back instead of a guess.
 
+import { quoted } from "./names.js";
+
 const SNOWFLAKE = /^\d{17,20}$/;
 
 export interface Resolvable {
@@ -97,4 +99,21 @@ export function resolveOne(query: string, items: Resolvable[]): Resolution {
   // A unique top score wins. A tie means the caller has to pick.
   if (ranked[0].score > ranked[1].score) return { match: ranked[0] };
   return { candidates: ranked.slice(0, 5) };
+}
+
+// Why a name picked out no single item: nothing matches it, or several do
+// equally well (often two with the same name), named with their IDs so the
+// next call can use the right one.
+export function noSingleMatch(kind: string, plural: string, query: string, resolution: Resolution): string {
+  const tied = "candidates" in resolution ? resolution.candidates : [];
+  if (tied.length < 2 && SNOWFLAKE.test(query.trim())) {
+    return `No ${kind} in this server has the ID ${query.trim()}. It may have been deleted already.`;
+  }
+  if (tied.length < 2) return `No single ${kind} matches ${quoted(query)}.`;
+  const sameName = tied.every((c) => normalize(c.name) === normalize(tied[0].name));
+  return (
+    `${tied.length} ${plural} match ${quoted(query)}${sameName ? ", all with the same name" : ""}: ` +
+    tied.map((c) => `${quoted(c.name)} (${c.id})`).join(", ") +
+    ". Pass the ID of the one meant."
+  );
 }

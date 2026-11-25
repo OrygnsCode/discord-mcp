@@ -27,7 +27,14 @@ const restByToken = new Map<string, REST>();
 export const MAX_SUBLIMIT_WAIT_MS = 30_000;
 export const MAX_RATE_LIMIT_WAIT_MS = 5 * 60_000;
 
-export function rejectsRateLimit(data: Pick<RateLimitData, "timeToReset" | "retryAfter" | "sublimitTimeout">): boolean {
+// Routes whose answer only decorates a result, so a held one is skipped
+// rather than waited for. Discord allows about three per-role member counts
+// per server every two minutes; a preview that waited for one sat silent
+// for up to two minutes. Every caller does without the number.
+const NEVER_WAIT = /\/roles\/member-counts$/;
+
+export function rejectsRateLimit(data: Pick<RateLimitData, "timeToReset" | "retryAfter" | "sublimitTimeout"> & { route?: string }): boolean {
+  if (data.route !== undefined && NEVER_WAIT.test(data.route)) return true;
   if ((data.sublimitTimeout ?? 0) > MAX_SUBLIMIT_WAIT_MS) return true;
   return Math.max(data.timeToReset ?? 0, data.retryAfter ?? 0) > MAX_RATE_LIMIT_WAIT_MS;
 }
@@ -39,13 +46,16 @@ export function describeRateLimit(err: unknown): string | null {
   const minutes = Math.max(1, Math.ceil(waitMs / 60_000));
   const at = new Date(Date.now() + waitMs).toISOString().slice(11, 16);
   const channelEdit = /^\/channels\/:id$/.test(err.route) && err.method.toUpperCase() === "PATCH";
+  const emojiUpload = /^\/guilds\/:id\/emojis$/.test(err.route) && err.method.toUpperCase() === "POST";
   return (
     `Discord is holding further ${err.method.toUpperCase()} requests to ${err.route} for about ` +
     `${minutes} minute${minutes === 1 ? "" : "s"} (until ${at} UTC)` +
     (channelEdit
       ? ", most likely its limit of about two name or topic changes per channel every 10 minutes"
-      : "") +
-    ". This request was not sent. Try again after that."
+      : emojiUpload
+        ? ", most likely its limit of about 50 emoji uploads per server an hour"
+        : "") +
+    ". Nothing was done. Try again after that."
   );
 }
 

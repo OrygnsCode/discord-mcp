@@ -64,28 +64,64 @@ export function usageLine(sw: UsageSwitch = usageSwitch(), env: Env = process.en
 
 // --- what is counted ---
 
-export const ERROR_CLASSES = ["permission", "intents", "rate_limited", "not_found", "validation", "no_token", "network", "other"] as const;
+export const ERROR_CLASSES = [
+  "permission",
+  "hierarchy",
+  "intents",
+  "rate_limited",
+  "not_found",
+  "ambiguous",
+  "validation",
+  "server_limit",
+  "file",
+  "confirm",
+  "no_token",
+  "network",
+  "discord_error",
+  "other",
+] as const;
 export type ErrorClass = (typeof ERROR_CLASSES)[number];
-export const GATE_EVENTS = ["preview", "confirmed", "declined"] as const;
+// expired: a confirm_token that came back after its time ran out.
+export const GATE_EVENTS = ["preview", "confirmed", "declined", "expired"] as const;
 export type GateEvent = (typeof GATE_EVENTS)[number];
 
 export interface DayTally {
   tools: Record<string, number>;
+  // Calls that failed, per tool. Absent in files from before 2.2.0.
+  failed?: Record<string, number>;
   gate: Partial<Record<GateEvent, number>>;
   errors: Partial<Record<ErrorClass, number>>;
   apps: string[];
 }
 
 // A failed result, sorted into a class by what it says. Only the class is
-// kept, never the text.
+// kept, never the text. The order matters: the first that fits wins, so the
+// narrow classes come before the broad words ("permission", "match") that
+// their messages also contain.
 export function errorClass(summary: string, data: unknown): ErrorClass {
-  if ((data as { rate_limited?: unknown } | null)?.rate_limited === true || /rate.?limit/i.test(summary)) return "rate_limited";
-  if (/No Discord bot token/i.test(summary)) return "no_token";
-  if (/intent/i.test(summary)) return "intents";
-  if (/permission|Missing Access|not allowed to|cannot (?:manage|edit|assign|kick|ban)/i.test(summary)) return "permission";
-  if (/Could not reach Discord|network|ECONN|ETIMEDOUT|fetch failed/i.test(summary)) return "network";
-  if (/has no parameter named|does not read|Input validation|Invalid arguments|has no dry run|expected .* received/i.test(summary)) return "validation";
-  if (/No (?:single |configured )?\w*.{0,40}match|not found|Unknown \w+|does not exist|no longer exists|is not one of the servers/i.test(summary)) return "not_found";
+  const d = (data ?? {}) as { rate_limited?: unknown; candidates?: unknown; discord_error?: { code?: unknown; status?: unknown } };
+  if (d.rate_limited === true || /rate.?limit|Discord is holding further|changed too many times/i.test(summary)) return "rate_limited";
+  if (/No Discord bot token|rejected the bot token/i.test(summary)) return "no_token";
+  if (/\bintents?\b/i.test(summary)) return "intents";
+  if (/confirm_token|That confirmation|confirmation dialog|Plans expire|Plan \S+ (?:has already been executed|is already being executed|was made for)|The server changed since plan/i.test(summary)) return "confirm";
+  if (/managed by an integration|integration-managed|belongs to an integration|bot's highest role|not below the bot|owner cannot be|does not let an owner|administrator be timed out|move a role above/i.test(summary)) return "hierarchy";
+  // "Fetch" with a capital: the image fetcher's own words, not the
+  // network-level "fetch failed" further down.
+  if (/Only http and https URLs|URLs with a user name|Unsupported \w+ type|the limit here is|larger than the limit here|^The \w+ is empty|Could not fetch|Refused to fetch|link answered|refused the upload as too large|files folder|Files on this computer|made smaller|make smaller|could not be read as an? (?:png|jpeg)/i.test(summary) || /Fetch(?:ing)? .*(?:failed|redirected|took longer)/.test(summary)) return "file";
+  if (/boost level|which this server does not have|This server cannot have|at most \d+|Maximum number of|subscription limit/i.test(summary)) return "server_limit";
+  if (/Could not reach Discord|\bnetwork\b|ECONN|ETIMEDOUT|fetch failed/.test(summary)) return "network";
+  if (/^(?:Pass|Give|Provide) |has no parameter named|does not read|Input validation|Invalid arguments|has no dry run|expected .* received|Unknown permission|is not an? (?:hex color|date|valid|template link|invite link)|Could not parse|cannot be combined|is in the past|only appl(?:y|ies) to|only means something|needs? (?:a |an )?\w+(?:_\w+)?\.$|Nothing to change|Discord does not allow|already exists|@everyone is held by every member|Only the permissions of @everyone|needs change_id/i.test(summary)) return "validation";
+  if (/Missing (?:Access|Permissions)|refused access|permission|not allowed to|cannot (?:manage|edit|assign|kick|ban)/i.test(summary)) return "permission";
+  if (/Multiple \w+ match|More than one|matches more than one|Several \w+ match|^\d+ \w+ match /i.test(summary) || (/No single/.test(summary) && Array.isArray(d.candidates) && d.candidates.length > 1)) return "ambiguous";
+  if (/No (?:single |configured )?\w*.{0,40}match|not found|Unknown \w+|does not exist|no longer exists|is not one of the servers|^There is no|^No (?:layout|template|staged plan|change|integration|subscription|scheduled message|bot) |is not banned|has no poll|Could not load member|disappeared mid-call|in this server has the ID|already been undone|Nothing is left to undo|(?:is|are) not among the items/i.test(summary)) return "not_found";
+  const code = typeof d.discord_error?.code === "number" ? d.discord_error.code : undefined;
+  if (code !== undefined) {
+    if (code >= 10000 && code < 11000) return "not_found";
+    if (code >= 30000 && code < 31000) return "server_limit";
+    if (code === 50013 || code === 50001) return "permission";
+    if (code === 50035 || code === 50006 || code === 50109) return "validation";
+  }
+  if (/Discord API error|Discord refused to delete|then Discord refused/.test(summary)) return "discord_error";
   return "other";
 }
 
@@ -163,7 +199,7 @@ export function usageDir(): string {
 }
 
 function emptyTally(): DayTally {
-  return { tools: {}, gate: {}, errors: {}, apps: [] };
+  return { tools: {}, failed: {}, gate: {}, errors: {}, apps: [] };
 }
 
 function today(): Running {
@@ -244,6 +280,8 @@ export function noteToolCall(tool: string, failed: { summary: string; data: unkn
   if (failed) {
     const cls = errorClass(failed.summary, failed.data);
     r.tally.errors[cls] = (r.tally.errors[cls] ?? 0) + 1;
+    r.tally.failed ??= {};
+    r.tally.failed[tool] = (r.tally.failed[tool] ?? 0) + 1;
   }
   changed(r);
   if (!failed && reachedDay === r.day && onActive) {

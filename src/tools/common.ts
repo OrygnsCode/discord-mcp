@@ -201,6 +201,21 @@ function problemResult(err: unknown): CallToolResult {
     );
   }
   if (err instanceof DiscordAPIError) {
+    // Listing or searching members takes no permission at all, only the
+    // Server Members intent, so a refusal there means the intent is off.
+    if (
+      err.status === 403 &&
+      err.code === 50001 &&
+      err.method.toUpperCase() === "GET" &&
+      /\/guilds\/\d+\/members(?:\/search)?(?:\?|$)/.test(err.url)
+    ) {
+      return fail(
+        "Discord refused to list this server's members (403), which happens when the bot's " +
+          "Server Members intent is off. Turn it on in the Discord Developer Portal, under Bot, " +
+          "Privileged Gateway Intents; run_setup_check shows which intents are on.",
+        { discord_error: { code: err.code, status: err.status } }
+      );
+    }
     if (err.status === 403) {
       return fail(
         "Discord refused access (403). The bot is missing a permission " +
@@ -837,7 +852,9 @@ export function requirePermissions(
 }
 
 export function parseHexColor(value: string): number {
-  const hex = value.replace(/^#/, "");
+  let hex = value.trim().replace(/^#/, "");
+  // The short form, #0ff for #00ffff.
+  if (/^[0-9a-fA-F]{3}$/.test(hex)) hex = hex.replace(/./g, (c) => c + c);
   if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
     throw new ToolProblem(
       fail(`"${value}" is not a hex color. Use the form #5865f2.`)

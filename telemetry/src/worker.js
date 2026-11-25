@@ -40,8 +40,12 @@ const SERVERS = new Set(['0', '1', '2-5', '6-20', '21+']);
 const LARGEST = new Set(['<50', '50-500', '500-5k', '5k+']);
 const AGES = new Set(['0', '1-7', '8-30', '31-90', '90+']);
 const COUNTS = new Set(['1-9', '10-99', '100+']);
-const GATE = new Set(['preview', 'confirmed', 'declined']);
-const ERRORS = new Set(['permission', 'intents', 'rate_limited', 'not_found', 'validation', 'no_token', 'network', 'other']);
+// Since 2.2.0 the client also counts expired confirmations, failed calls
+// per tool (a day's `failed`), and the error kinds hierarchy, ambiguous,
+// server_limit, file, confirm and discord_error. An older client never
+// sends them.
+const GATE = new Set(['preview', 'confirmed', 'declined', 'expired']);
+const ERRORS = new Set(['permission', 'hierarchy', 'intents', 'rate_limited', 'not_found', 'ambiguous', 'validation', 'server_limit', 'file', 'confirm', 'no_token', 'network', 'discord_error', 'other']);
 const FLOWS = new Set(['fresh', 'add_bot', 'reregister', 'upgrade']);
 const OUTCOMES = new Set(['completed', 'unfinished', 'cancelled', 'failed']);
 const SETUP_APPS = new Set(['claude-desktop', 'claude-code', 'cursor', 'windsurf', 'snippet', 'other']);
@@ -189,6 +193,7 @@ export function cleanPing(body, now) {
     days.push({
       d: d.d,
       tools: bandMap(d.tools, TOOL_RE),
+      failed: bandMap(d.failed, TOOL_RE),
       gate: bandMap(d.gate, GATE),
       errors: bandMap(d.errors, ERRORS),
       apps: [...new Set((Array.isArray(d.apps) ? d.apps : []).slice(0, 10).map((a) => pick(a, APPS)))],
@@ -248,12 +253,17 @@ export function pingRows(r, today, country) {
     [today, 'largest', r.largest],
     [today, 'age', r.age],
   ];
-  if (r.first.week) rows.push([today, 'first_week', '']);
-  if (r.first.month) rows.push([today, 'first_month', '']);
-  if (r.first.ever) rows.push([today, 'first_ever', '']);
+  // A container run without a saved state is first of everything every
+  // time, so those count apart: key '' stays real installs, as it always
+  // was, and 'container' holds the runs that only look new.
+  const firstKey = r.ctx === 'container' ? 'container' : '';
+  if (r.first.week) rows.push([today, 'first_week', firstKey]);
+  if (r.first.month) rows.push([today, 'first_month', firstKey]);
+  if (r.first.ever) rows.push([today, 'first_ever', firstKey]);
   for (const d of r.days) {
     rows.push([d.d, 'reports', '']);
     for (const [tool, band] of Object.entries(d.tools)) rows.push([d.d, 'tool', `${tool}|${band}`]);
+    for (const [tool, band] of Object.entries(d.failed)) rows.push([d.d, 'tool_failed', `${tool}|${band}`]);
     for (const [event, band] of Object.entries(d.gate)) rows.push([d.d, 'gate', `${event}|${band}`]);
     for (const [cls, band] of Object.entries(d.errors)) rows.push([d.d, 'error', `${cls}|${band}`]);
     for (const app of d.apps) rows.push([d.d, 'active_app', app]);
@@ -302,7 +312,7 @@ async function stats(db, days) {
   const perDay = {};
   const totals = {};
   for (const { day, metric, key, n } of results) {
-    if (['pings', 'first_week', 'first_month', 'first_ever', 'reports', 'dev_pings'].includes(metric) && key !== 'setup') {
+    if (['pings', 'first_week', 'first_month', 'first_ever', 'reports', 'dev_pings'].includes(metric) && key !== 'setup' && key !== 'container') {
       perDay[day] ??= { pings: 0, first_week: 0, first_month: 0, first_ever: 0, reports: 0, dev_pings: 0 };
       perDay[day][metric] += n;
       continue;

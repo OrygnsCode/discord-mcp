@@ -7,7 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { DiscordAPIError } from "@discordjs/rest";
 import type { ServerConfig } from "../config.js";
 import { getBotUser, invalidateGuildCaches, invalidateGuildList } from "../discord/guildData.js";
-import { fetchImageAsDataUri } from "../discord/images.js";
+import { IMAGE_TYPES, loadAsset, toDataUri } from "../discord/images.js";
 import { fetchPublicUrl } from "../discord/fetchUrl.js";
 import { dataDir } from "../home.js";
 import { cancelSchedule, listSchedules } from "../scheduler.js";
@@ -106,15 +106,19 @@ export function registerBotProfileTools(server: McpServer, config: ServerConfig)
           .describe("Public URL of the avatar image (png, jpeg, gif, webp), or none."),
         banner_url: z.string().optional()
           .describe("Public URL of the profile banner image, or none."),
+        avatar_file: z.string().min(1).optional()
+          .describe("The avatar from the local files folder (DISCORD_MCP_FILES_DIR), by name, instead of avatar_url."),
+        banner_file: z.string().min(1).optional()
+          .describe("The profile banner from the local files folder, by name, instead of banner_url."),
         bio: z.string().max(190).optional()
           .describe("Server only: the About Me shown in that server, or none. The bot's own About Me is set in the Developer Portal."),
         dry_run: z.boolean().optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    guarded(async ({ scope, guild, bot, nickname, username, avatar_url, banner_url, bio, dry_run }) => {
+    guarded(async ({ scope, guild, bot, nickname, username, avatar_url, banner_url, avatar_file, banner_file, bio, dry_run }) => {
       const everywhere = scope === "everywhere";
-      if ([nickname, username, avatar_url, banner_url, bio].every((v) => v === undefined)) {
+      if ([nickname, username, avatar_url, banner_url, avatar_file, banner_file, bio].every((v) => v === undefined)) {
         return fail("Pass at least one thing to change.");
       }
       if (everywhere && (nickname !== undefined || bio !== undefined)) {
@@ -136,19 +140,20 @@ export function registerBotProfileTools(server: McpServer, config: ServerConfig)
 
       const body: Record<string, unknown> = {};
       const changes: string[] = [];
-      for (const [field, url, label] of [
-        ["avatar", avatar_url, "avatar"],
-        ["banner", banner_url, "banner"],
+      for (const [field, url, file, label] of [
+        ["avatar", avatar_url, avatar_file, "avatar"],
+        ["banner", banner_url, banner_file, "banner"],
       ] as const) {
-        if (url === undefined) continue;
-        if (isNone(url)) {
+        if (url === undefined && file === undefined) continue;
+        if (url !== undefined && file !== undefined) return fail(`Pass ${field}_url or ${field}_file, one of them. Nothing was changed.`);
+        if (url !== undefined && isNone(url)) {
           body[field] = null;
           changes.push(everywhere ? `${label} removed` : `server ${label} removed`);
           continue;
         }
-        const image = await fetchImageAsDataUri(url, MAX_PROFILE_IMAGE_BYTES);
+        const image = await loadAsset({ url, file }, MAX_PROFILE_IMAGE_BYTES, IMAGE_TYPES, label);
         if (!image.ok) return fail(`The ${label}: ${image.error} Nothing was changed.`);
-        body[field] = image.dataUri;
+        body[field] = toDataUri(image.contentType, image.data);
         changes.push(`new ${label}`);
       }
       if (nickname !== undefined) {

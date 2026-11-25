@@ -42,7 +42,7 @@ import {
   PERMISSION_PRESETS,
   ALL_PERMISSIONS,
 } from "../discord/preflight.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import { assertLinkedChannel } from "../discord/messageLinks.js";
 import {
   channelLabel,
@@ -743,11 +743,12 @@ export function registerWriteTools(
       secondary_color,
       holographic,
       icon_url,
+      icon_file,
       icon_emoji,
       dry_run,
     }) => {
       const { rest, guildId } = await enter(config, guild);
-      const appearance = await roleAppearanceBody(rest, guildId, { color, secondary_color, holographic, icon_url, icon_emoji });
+      const appearance = await roleAppearanceBody(rest, guildId, { color, secondary_color, holographic, icon_url, icon_file, icon_emoji });
       if (!appearance.ok) return fail(appearance.reason);
 
       let bits = PERMISSION_PRESETS[preset ?? "none"];
@@ -862,7 +863,7 @@ export function registerWriteTools(
         roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single role matches "${role}".`, {
+        return fail(noSingleMatch("role", "roles", role, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }

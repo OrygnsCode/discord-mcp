@@ -25,7 +25,8 @@ for (const [day, d] of Object.entries(perDay)) {
 }
 const sum = (key) => Object.values(perDay).reduce((n, d) => n + d[key], 0);
 console.log(`\nInstalls active in the span (first-of-month, summed): ${sum("first_month")}`);
-console.log(`New installs: ${sum("first_ever")}\n`);
+console.log(`New installs: ${sum("first_ever")}`);
+console.log(`Container runs that only looked new (not counted above): ${totals.first_ever?.container ?? 0}\n`);
 
 const show = (title, entries, limit = 15) => {
   const list = Object.entries(entries ?? {}).sort((a, b) => b[1] - a[1]).slice(0, limit);
@@ -46,6 +47,7 @@ for (const [key, n] of Object.entries(totals.tool ?? {})) {
 show("tools (install-days)", tools, 40);
 show("gate", totals.gate);
 show("errors", totals.error);
+show("failed calls by tool (install-days)", totals.tool_failed, 40);
 show("setup runs", totals.setup);
 show("setup apps", totals.setup_app);
 show("setup stopped at (outcome|step)", totals.setup_step);

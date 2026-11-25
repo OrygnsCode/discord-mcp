@@ -17,7 +17,7 @@ import { channelLabel, grantLines, grantPhrase, grantsForGivingRoles, grantsKey,
 import { CONFIRM_STEPS, loadScene } from "./grantGate.js";
 import { changeData, recordChange, undoNote } from "./changes.js";
 import { ok, fail } from "../envelope.js";
-import { fetchImageAsDataUri, savedImageBefore } from "../discord/images.js";
+import { IMAGE_TYPES, loadAsset, savedImageBefore, toDataUri } from "../discord/images.js";
 import { templateCode } from "../builder/template.js";
 
 // Discord does not document a size cap for server images; this server holds
@@ -121,6 +121,10 @@ export function registerSettingsTools(
           .describe("Public URL of the new server icon (png, jpeg, gif, webp), or none to remove it. A gif needs the animated icon feature."),
         banner_url: z.string().optional()
           .describe("Public URL of the banner shown at the top of the channel list, or none. Needs boost level 2."),
+        icon_file: z.string().min(1).optional()
+          .describe("The new icon from the local files folder (DISCORD_MCP_FILES_DIR), by name, instead of icon_url."),
+        banner_file: z.string().min(1).optional()
+          .describe("The banner from the local files folder, by name, instead of banner_url. Needs boost level 2."),
         invite_background_url: z.string().optional()
           .describe("Public URL of the invite page background (the splash), or none. Needs boost level 1."),
         discovery_background_url: z.string().optional()
@@ -147,6 +151,8 @@ export function registerSettingsTools(
       public_updates_channel,
       icon_url,
       banner_url,
+      icon_file,
+      banner_file,
       invite_background_url,
       discovery_background_url,
       explicit_media_filter,
@@ -167,17 +173,21 @@ export function registerSettingsTools(
       // Images: each needs a server feature Discord grants with boosts or
       // Discovery, checked first so a missing one is named instead of
       // failing with a bare form error.
-      const images: Array<[string, string | undefined, string, string | undefined, string]> = [
-        ["icon", icon_url, "icon", undefined, "icon"],
-        ["banner", banner_url, "banner", "BANNER", "banner (it needs boost level 2)"],
-        ["splash", invite_background_url, "invite background", "INVITE_SPLASH", "invite background (it needs boost level 1)"],
-        ["discovery_splash", discovery_background_url, "discovery background", "DISCOVERABLE", "discovery background (it needs a server in Server Discovery)"],
+      // [field, link, file in the files folder, label, feature, what it needs]
+      const images: Array<[string, string | undefined, string | undefined, string, string | undefined, string]> = [
+        ["icon", icon_url, icon_file, "icon", undefined, "icon"],
+        ["banner", banner_url, banner_file, "banner", "BANNER", "banner (it needs boost level 2)"],
+        ["splash", invite_background_url, undefined, "invite background", "INVITE_SPLASH", "invite background (it needs boost level 1)"],
+        ["discovery_splash", discovery_background_url, undefined, "discovery background", "DISCOVERABLE", "discovery background (it needs a server in Server Discovery)"],
       ];
-      if (images.some(([, url]) => url !== undefined)) {
+      if (images.some(([, url, file]) => url !== undefined || file !== undefined)) {
         const current = await serverNow();
-        for (const [field, url, label, feature, need] of images) {
-          if (url === undefined) continue;
-          if (/^none$/i.test(url.trim())) {
+        for (const [field, url, file, label, feature, need] of images) {
+          if (url === undefined && file === undefined) continue;
+          if (url !== undefined && file !== undefined) {
+            return fail(`Pass ${field === "icon" ? "icon" : "banner"}_url or ${field === "icon" ? "icon" : "banner"}_file, one of them. Nothing was changed.`);
+          }
+          if (url !== undefined && /^none$/i.test(url.trim())) {
             body[field] = null;
             changes.push(`${label} removed`);
             continue;
@@ -185,8 +195,9 @@ export function registerSettingsTools(
           if (feature && !current.features.includes(feature as GuildFeature)) {
             return fail(`This server cannot have a ${need}. Nothing was changed.`);
           }
-          const image = await fetchImageAsDataUri(url, MAX_SERVER_IMAGE_BYTES);
-          if (!image.ok) return fail(`The ${label}: ${image.error} Nothing was changed.`);
+          const loadedImage = await loadAsset({ url, file }, MAX_SERVER_IMAGE_BYTES, IMAGE_TYPES, label);
+          if (!loadedImage.ok) return fail(`The ${label}: ${loadedImage.error} Nothing was changed.`);
+          const image = { dataUri: toDataUri(loadedImage.contentType, loadedImage.data) };
           if (image.dataUri.startsWith("data:image/gif") && field === "icon" && !current.features.includes("ANIMATED_ICON" as GuildFeature)) {
             return fail("An animated icon needs boost level 1 (the animated icon feature). Use a still image. Nothing was changed.");
           }
@@ -344,6 +355,8 @@ export function registerSettingsTools(
             public_updates_channel: public_updates_channel ?? null,
             icon_url: icon_url ?? null,
             banner_url: banner_url ?? null,
+            icon_file: icon_file ?? null,
+            banner_file: banner_file ?? null,
             invite_background_url: invite_background_url ?? null,
             discovery_background_url: discovery_background_url ?? null,
             explicit_media_filter: explicit_media_filter ?? null,
@@ -763,7 +776,7 @@ export function registerSettingsTools(
         | undefined;
       if (prompts) {
         const { getRoles } = await import("../discord/guildData.js");
-        const { resolveOne } = await import("../discord/resolve.js");
+        const { resolveOne, noSingleMatch } = await import("../discord/resolve.js");
         const roles = await getRoles(rest, guildId);
         builtPrompts = [];
         for (const [promptIndex, prompt] of prompts.entries()) {
@@ -786,7 +799,7 @@ export function registerSettingsTools(
                 roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
               );
               if (!("match" in resolution)) {
-                return fail(`No single role matches "${entry}".`);
+                return fail(noSingleMatch("role", "roles", entry, resolution));
               }
               roleIds.push(resolution.match.id);
             }

@@ -25,7 +25,7 @@ import {
   PERMISSION_PRESETS,
   ALL_PERMISSIONS,
 } from "../discord/preflight.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import {
   compileComponents,
   componentsParam,
@@ -34,7 +34,7 @@ import {
 } from "../discord/components.js";
 import { gateDestructive } from "../safety.js";
 import { plainText, quoted } from "../discord/names.js";
-import { channelLabel, grantLines, grantPhrase, grantsForRoleChange, grantsKey, hasGrants, type Scene } from "../discord/grants.js";
+import { channelLabel, grantLines, grantPhrase, grantsForRoleChange, grantsKey, hasGrants, joinWords, type Scene } from "../discord/grants.js";
 import { CONFIRM_STEPS, POWER_EXAMPLES, hiddenNote, holdersPhrase, loadScene, roleMemberCount } from "./grantGate.js";
 import { roleHolders } from "../builder/executor.js";
 import type { RecordEntry } from "../builder/records.js";
@@ -113,14 +113,31 @@ async function webhookForEdit(rest: REST, webhookId: string, postedAs: string): 
 }
 
 // Shared role resolution with the safety checks every role mutation needs:
-// the role must exist, must not be integration-managed, must not be
-// @everyone, and must sit below the bot's highest role.
+// the role must exist, must not be integration-managed, and must sit below
+// the bot's highest role. @everyone, which every member holds, only where
+// the caller says it may be used (update_role, for its permissions).
 async function resolveManageableRole(
   rest: Awaited<ReturnType<typeof enter>>["rest"],
   guildId: string,
-  roleQuery: string
+  roleQuery: string,
+  everyone: "refuse" | "allow" = "refuse"
 ): Promise<{ role: APIRole; warnings: string[] }> {
   const roles = await getRoles(rest, guildId);
+  if (roleQuery.trim() === "@everyone" || roleQuery.trim() === guildId) {
+    if (everyone === "refuse") {
+      throw new ToolProblem(
+        fail(
+          "@everyone is held by every member and cannot be deleted. Its permissions change with " +
+            "update_role (role \"@everyone\"), or per channel with set_channel_permissions."
+        )
+      );
+    }
+    const role = roles.find((r) => r.id === guildId);
+    if (!role) throw new ToolProblem(fail("The @everyone role could not be read."));
+    const perms = await botPermissions(rest, guildId);
+    requirePermissions(perms, [[P.ManageRoles, "Manage Roles"]], "in this server");
+    return { role, warnings: [] };
+  }
   const resolution = resolveOne(
     roleQuery,
     roles
@@ -129,7 +146,7 @@ async function resolveManageableRole(
   );
   if (!("match" in resolution)) {
     throw new ToolProblem(
-      fail(`No single role matches "${roleQuery}".`, {
+      fail(noSingleMatch("role", "roles", roleQuery, resolution), {
         candidates: "candidates" in resolution ? resolution.candidates : [],
       })
     );
@@ -424,9 +441,11 @@ export function registerManageTools(
         "role's permission set with the named bundle plus listed names. " +
         "Only passed fields change. Supports dry_run. A permission change " +
         `that would give the role ${POWER_EXAMPLES}, or let it see channels ` +
-        `it cannot see now, needs confirming: ${CONFIRM_STEPS}.`,
+        `it cannot see now, needs confirming: ${CONFIRM_STEPS}. ` +
+        "Role \"@everyone\" takes permissions only, and any change to it needs " +
+        "confirming, since every member holds it.",
       inputSchema: {
-        role: z.string().describe("Role name or ID."),
+        role: z.string().describe("Role name or ID, or @everyone."),
         guild: guildParam,
         name: z.string().min(1).max(100).optional(),
         color: z.string().optional().describe("Hex color like #00b0f4."),
@@ -452,6 +471,7 @@ export function registerManageTools(
       secondary_color,
       holographic,
       icon_url,
+      icon_file,
       icon_emoji,
       dry_run,
       confirm_token,
@@ -460,11 +480,18 @@ export function registerManageTools(
       const { role: target, warnings } = await resolveManageableRole(
         rest,
         guildId,
-        role
+        role,
+        "allow"
       );
+      const isEveryone = target.id === guildId;
 
       const changingPerms = preset !== undefined || permissions !== undefined;
-      const look = { color, secondary_color, holographic, icon_url, icon_emoji };
+      const look = { color, secondary_color, holographic, icon_url, icon_file, icon_emoji };
+      if (isEveryone && (name !== undefined || color !== undefined || hoist !== undefined || mentionable !== undefined || hasRoleAppearance(look))) {
+        return fail(
+          "Only the permissions of @everyone can change: it has no name, color, icon, or place in the member list of its own. Nothing was changed."
+        );
+      }
       if (
         name === undefined &&
         color === undefined &&
@@ -502,11 +529,15 @@ export function registerManageTools(
             );
           }
         }
+        // A permission Discord has that this version has no name for cannot
+        // be asked for or against, so the role keeps whatever it has of
+        // those rather than losing them unseen.
+        bits |= BigInt(target.permissions) & ~ALL_PERMISSIONS;
       }
 
       const changes: string[] = [];
       if (name !== undefined) changes.push(`name to "${name}"`);
-      if (color !== undefined) changes.push(`color to ${color}`);
+      if (color !== undefined) changes.push(`color to #${parseHexColor(color).toString(16).padStart(6, "0")}`);
       changes.push(...appearance.changes);
       if (hoist !== undefined) changes.push(`hoist to ${hoist}`);
       if (mentionable !== undefined) changes.push(`mentionable to ${mentionable}`);
@@ -521,7 +552,32 @@ export function registerManageTools(
           ...scene,
           roles: scene.roles.map((r) => (r.id === target.id ? { ...r, permissions: bits!.toString() } : r)),
         };
-        const grants = grantsForRoleChange(scene, changed, target.id);
+        // grantsForRoleChange takes no role for @everyone.
+        const grants = grantsForRoleChange(scene, changed, isEveryone ? undefined : target.id);
+        // Every member holds @everyone, so any change to what it may do,
+        // taking away as well as giving, is shown before it is made.
+        const before = BigInt(target.permissions);
+        const plain = (b: bigint) => describePermissions(b).map((n) => n.replace(/_/g, " "));
+        const lost = isEveryone ? plain(before & ~bits) : [];
+        const gained = isEveryone ? plain(bits & ~before) : [];
+        if (isEveryone && !hasGrants(grants) && (lost.length > 0 || gained.length > 0)) {
+          const lines = [...gained.map((p) => `Everyone can now: ${p}`), ...lost.map((p) => `Everyone can no longer: ${p}`)];
+          const gate = gateDestructive({
+            tool: "update_role",
+            args: { role: target.id, permissions: bits.toString() },
+            dryRun: dry_run,
+            confirmToken: confirm_token,
+            previewSummary:
+              "Would change what every member of the server may do (the @everyone role): " +
+              [gained.length > 0 ? `can now ${joinWords(gained)}` : "", lost.length > 0 ? `can no longer ${joinWords(lost)}` : ""]
+                .filter(Boolean)
+                .join("; ") +
+              ". Roles and channel settings that allow more still apply.",
+            dialogLines: lines,
+            previewDetails: { role: { id: target.id, name: "@everyone" }, gained, lost },
+          });
+          if (gate) return gate;
+        }
         if (hasGrants(grants)) {
           const hidden = hiddenNote(rest, guildId, scene);
           const gate = gateDestructive({
@@ -535,15 +591,18 @@ export function registerManageTools(
               secondary_color: secondary_color ?? null,
               holographic: holographic ?? null,
               icon_url: icon_url ?? null,
+              icon_file: icon_file ?? null,
               icon_emoji: icon_emoji ?? null,
               permissions: bits.toString(),
               grants: grantsKey(grants),
             },
             dryRun: dry_run,
             confirmToken: confirm_token,
-            previewSummary:
-              `Would change the permissions of the role ${quoted(target.name)} so that people with it can ` +
-              `${grantPhrase(grants)}.${holdersPhrase(await roleMemberCount(rest, guildId, target.id))}`,
+            previewSummary: isEveryone
+              ? `Would change what every member of the server may do (the @everyone role), so that everyone can ${grantPhrase(grants)}.` +
+                (lost.length > 0 ? ` Everyone could no longer ${joinWords(lost)}.` : "")
+              : `Would change the permissions of the role ${quoted(target.name)} so that people with it can ` +
+                `${grantPhrase(grants)}.${holdersPhrase(await roleMemberCount(rest, guildId, target.id))}`,
             ...(hidden ? { note: hidden } : {}),
             dialogLines: grantLines(grants),
             previewDetails: {

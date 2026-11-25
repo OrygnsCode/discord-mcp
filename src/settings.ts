@@ -24,6 +24,7 @@ export const SETTING_NAMES = [
   "HTTP_ORIGINS",
   "SCHEDULER_TICK_MS",
   "ALLOW_PRIVATE_URLS",
+  "FILES_DIR",
   "UPDATE_CHECK",
   "STRICT_PARAMS",
   "READ_ONLY",
@@ -44,10 +45,13 @@ export function settingSource(name: SettingName, env: Env = process.env): string
   return current;
 }
 
-// The trimmed value, or undefined when unset or blank.
+// The trimmed value, or undefined when unset or blank. Claude Desktop
+// passes a bundle setting that was left empty and has no default as its
+// own placeholder text, "${user_config.name}"; that is unset too.
 export function setting(name: SettingName, env: Env = process.env): string | undefined {
   const value = env[settingSource(name, env)]?.trim();
-  return value ? value : undefined;
+  if (!value || /^\$\{user_config\.[^}]*\}$/.test(value)) return undefined;
+  return value;
 }
 
 // Old names currently doing the work, for the setup check to point out.

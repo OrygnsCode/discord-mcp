@@ -77,6 +77,37 @@ function privateRefusal(host: string): string {
   );
 }
 
+// A link that answered with an error, in words: what the status means and
+// what to do about it. Discord's own attachment links carry a signature
+// that runs out after about a day, after which they answer 404.
+function statusRefusal(status: number, url: URL): string {
+  const meaning =
+    status === 404 ? "not found"
+    : status === 410 ? "gone"
+    : status === 401 || status === 403 ? "access refused"
+    : status === 429 ? "too many requests"
+    : status >= 500 ? "an error on that site"
+    : "refused";
+  const discordAttachment =
+    /(^|\.)(discordapp\.(com|net)|discord\.com)$/i.test(url.hostname) && /^\/(ephemeral-)?attachments\//.test(url.pathname);
+  const advice = discordAttachment
+    ? " Discord attachment links stop working after about a day; get a fresh link to the file."
+    : status === 429 || status >= 500
+      ? " Trying again later may work."
+      : " Use a direct link to the file itself, one that opens just the file in a browser.";
+  return `The link answered ${status} (${meaning}), so there was nothing to fetch from ${url.host}${url.pathname}.${advice}`;
+}
+
+// Why a site could not be reached, when the error says.
+function unreachable(err: unknown): string {
+  const code = String((err as { code?: unknown })?.code ?? "");
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return ": no site answers to that name";
+  if (code === "ECONNREFUSED") return ": the site refused the connection";
+  if (code === "ECONNRESET" || code === "EPIPE") return ": the connection was cut";
+  if (/CERT|SSL|TLS/.test(code)) return ": its security certificate is not valid";
+  return "";
+}
+
 class Refused extends Error {}
 
 // DNS lookup that drops the connection when any answer is private, so a
@@ -167,7 +198,14 @@ export async function fetchPublicUrl(
         };
       }
       if (url.protocol !== "https:" && url.protocol !== "http:") {
-        return { ok: false, error: `Only http and https URLs can be fetched, not ${url.protocol.replace(":", "")}.` };
+        // file:///..., and C:\... which parses as a URL whose scheme is "c".
+        const localFile = url.protocol === "file:" || /^[a-z]:$/i.test(url.protocol);
+        return {
+          ok: false,
+          error: localFile
+            ? "Only http and https URLs can be fetched. Files on this computer are never read, so a file has to be at a public link first."
+            : `Only http and https URLs can be fetched, not ${url.protocol.replace(":", "")}.`,
+        };
       }
       if (url.username || url.password) {
         return { ok: false, error: "URLs with a user name or password in them are not fetched." };
@@ -185,7 +223,7 @@ export async function fetchPublicUrl(
         if (aborter.signal.aborted) {
           return { ok: false, error: `Fetching ${url.host} took longer than ${TIMEOUT_MS / 1000} seconds.` };
         }
-        return { ok: false, error: `Could not fetch ${url.href}.` };
+        return { ok: false, error: `Could not fetch ${url.href}${unreachable(err)}.` };
       }
       const status = res.statusCode ?? 0;
       if (status >= 300 && status < 400 && res.headers.location) {
@@ -202,7 +240,7 @@ export async function fetchPublicUrl(
       }
       if (status < 200 || status >= 300) {
         res.resume();
-        return { ok: false, error: `Fetch failed with status ${status}.` };
+        return { ok: false, error: statusRefusal(status, url) };
       }
       const declared = Number(res.headers["content-length"]);
       if (Number.isFinite(declared) && declared > maxBytes) {

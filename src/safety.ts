@@ -47,6 +47,8 @@ interface PendingConfirmation {
   tool: string;
   argsHash: string;
   expiresAt: number;
+  // How long it was good for, to say so if it comes back too late.
+  ttlMs?: number;
   // What the preview showed, when the tool asked for it to be kept (see
   // GateInput.keep). Handed back when the action goes ahead.
   kept?: unknown;
@@ -133,9 +135,43 @@ function hashAction(
     .digest("hex");
 }
 
+// Tokens that stopped working, and why, so one that comes back late or a
+// second time gets the real reason instead of "unknown". An hour is long
+// past any conversation's pause; the cap only bounds a runaway caller.
+const SPENT_KEEP_MS = 60 * 60_000;
+const SPENT_CAP = 5000;
+const spent = new Map<string, { why: "used" | "expired"; ttlMs: number; at: number }>();
+
+function spend(token: string, why: "used" | "expired", now: number): void {
+  const entry = pending.get(token);
+  pending.delete(token);
+  spent.set(token, { why, ttlMs: entry?.ttlMs ?? TOKEN_TTL_MS, at: now });
+  if (spent.size > SPENT_CAP) spent.delete(spent.keys().next().value as string);
+}
+
+function spentTokenMessage(token: string): string {
+  const fresh = "Call the tool again without a token to get a fresh preview.";
+  const was = spent.get(token);
+  if (was?.why === "expired") {
+    const minutes = Math.round(was.ttlMs / 60_000);
+    return (
+      `That confirm_token expired, so nothing was changed: a token works for ` +
+      `${minutes} minute${minutes === 1 ? "" : "s"} after its preview. ${fresh} ` +
+      "For several actions, confirm each one soon after its own preview."
+    );
+  }
+  if (was?.why === "used") {
+    return `That confirm_token was already used, so nothing more was changed: each token works once. ${fresh}`;
+  }
+  return `That confirm_token is not one this server issued (or it is from before the server restarted), so nothing was changed. ${fresh}`;
+}
+
 function sweepExpired(now: number): void {
   for (const [token, entry] of pending) {
-    if (entry.expiresAt <= now) pending.delete(token);
+    if (entry.expiresAt <= now) spend(token, "expired", now);
+  }
+  for (const [token, entry] of spent) {
+    if (now - entry.at > SPENT_KEEP_MS) spent.delete(token);
   }
   for (const [id, entry] of dialogs) {
     if (entry.expiresAt <= now) dialogs.delete(id);
@@ -242,32 +278,21 @@ export function gateKeeping(input: GateInput): GateOutcome {
   if (input.confirmToken) {
     const entry = pending.get(input.confirmToken);
     if (!entry) {
-      return {
-        answer: fail(
-          "That confirm_token is unknown or was already used. Call the tool " +
-            "again without a token to get a fresh preview."
-        ),
-      };
-    }
-    if (entry.expiresAt <= now) {
-      pending.delete(input.confirmToken);
-      return {
-        answer: fail(
-          "That confirm_token expired. Call the tool again without a token " +
-            "to get a fresh preview."
-        ),
-      };
+      if (spent.get(input.confirmToken)?.why === "expired") noteGate("expired");
+      return { answer: fail(spentTokenMessage(input.confirmToken)) };
     }
     if (entry.tool !== input.tool || entry.argsHash !== argsHash) {
       return {
         answer: fail(
-          "That confirm_token was issued for a different action. Tokens are " +
-            "bound to the exact operation they previewed."
+          "That confirm_token was issued for a different action, so nothing " +
+            "was changed. A token covers only the exact action its preview " +
+            "showed: call the tool again without a token, with the same " +
+            "arguments, for a preview of this one."
         ),
       };
     }
     if (dialog) return { answer: askInDialog(input, argsHash, input.confirmToken, entry.kept) };
-    pending.delete(input.confirmToken);
+    spend(input.confirmToken, "used", now);
     if (refuse) return { answer: refuseWithoutDialog(input) };
     noteGate("confirmed");
     return { answer: null, kept: entry.kept };
@@ -281,6 +306,7 @@ export function gateKeeping(input: GateInput): GateOutcome {
       tool: input.tool,
       argsHash,
       expiresAt: now + ttl,
+      ttlMs: ttl,
       ...(input.keep !== undefined ? { kept: input.keep } : {}),
     });
     noteGate("preview");
@@ -387,7 +413,7 @@ function dialogAnswer(input: GateInput, argsHash: string, id: string): GateResul
   // One answer per dialog, and the token that opened it is spent whatever
   // the answer: going ahead later means a fresh preview and a fresh dialog.
   dialogs.delete(id);
-  if (entry.token) pending.delete(entry.token);
+  if (entry.token) spend(entry.token, "used", Date.now());
 
   const details = { executed: false, preview: input.previewDetails ?? null };
   const ctx = currentRequest();
@@ -437,4 +463,4 @@ function refuseWithoutDialog(input: GateInput): CallToolResult {
 
 // Exposed for unit tests only: lets tests inspect and age the token store
 // without reaching into module internals blindly.
-export const __testing = { pending, dialogs, TOKEN_TTL_MS, DIALOG_TTL_MS };
+export const __testing = { pending, dialogs, spent, TOKEN_TTL_MS, DIALOG_TTL_MS };

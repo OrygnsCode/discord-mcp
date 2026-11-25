@@ -231,6 +231,12 @@ async function crashCleanup() {
     for (const r of roles.filter((x) => /^omnitest/i.test(x.name ?? ""))) {
       await call("DELETE", `/guilds/${guildId}/roles/${r.id}`);
     }
+    const emojis = (await call("GET", `/guilds/${guildId}/emojis`)) ?? [];
+    for (const e of emojis.filter((x) => /^omnitest/i.test(x.name ?? ""))) await call("DELETE", `/guilds/${guildId}/emojis/${e.id}`);
+    const stickers = (await call("GET", `/guilds/${guildId}/stickers`)) ?? [];
+    for (const s of stickers.filter((x) => /^omnitest/i.test(x.name ?? ""))) await call("DELETE", `/guilds/${guildId}/stickers/${s.id}`);
+    const sounds = (await call("GET", `/guilds/${guildId}/soundboard-sounds`))?.items ?? [];
+    for (const s of sounds.filter((x) => /^omnitest/i.test(x.name ?? ""))) await call("DELETE", `/guilds/${guildId}/soundboard-sounds/${s.sound_id}`);
     if (OTHER_TEST_BOT) await call("DELETE", `/guilds/${guildId}/bans/${OTHER_TEST_BOT}`);
     if (systemChannelAtStart !== undefined) {
       const g = await call("GET", `/guilds/${guildId}`);
@@ -958,6 +964,36 @@ try {
   });
   expect(emojiGone.data?.deleted === true, "gated emoji delete works");
 
+  // Several emoji at once, deleted under one token, and one of them brought
+  // back from its saved picture by undoing part of the change.
+  const emojiBatch = await callTool("create_emoji", {
+    emojis: [
+      { name: "omnitest_b1", image_url: "https://cdn.discordapp.com/embed/avatars/1.png" },
+      { name: "omnitest_b2", image_url: "https://cdn.discordapp.com/embed/avatars/2.png" },
+    ],
+  });
+  expect((emojiBatch.data?.created ?? []).length === 2 && typeof emojiBatch.data?.change_id === "string", "several emoji upload in one call, as one change");
+  const batchGate = await callTool("delete_emoji", { emojis: ["omnitest_b1", "omnitest_b2"] });
+  expect(batchGate.data?.executed === false && /Would delete 2 emoji/.test(batchGate.summary ?? ""), "several emoji share one delete preview");
+  const batchGone = await callTool("delete_emoji", { emojis: ["omnitest_b1", "omnitest_b2"], confirm_token: batchGate.data?.confirm_token });
+  expect(batchGone.data?.deleted === 2 && typeof batchGone.data?.change_id === "string", "and go with one token, recorded for undo");
+  const partPreview = await callTool("undo_change", { change_id: batchGone.data?.change_id, only: ["omnitest_b2"] });
+  expect(partPreview.data?.executed === false && /part of change/.test(partPreview.summary ?? ""), "undoing part of a change previews just that part");
+  await callTool("undo_change", { change_id: batchGone.data?.change_id, only: ["omnitest_b2"], confirm_token: partPreview.data?.confirm_token });
+  const afterPart = ((await callTool("list_emojis")).data?.emojis ?? []).map((e) => e.name);
+  expect(afterPart.includes("omnitest_b2") && !afterPart.includes("omnitest_b1"), "a deleted emoji comes back from its saved picture, alone");
+  const backGate = await callTool("delete_emoji", { emoji: "omnitest_b2" });
+  await callTool("delete_emoji", { emoji: "omnitest_b2", confirm_token: backGate.data?.confirm_token });
+
+  // What the server can hold, and the roles the bot cannot change, said up front.
+  const roomy = await callTool("get_server_overview");
+  expect(typeof roomy.data?.slots?.emoji_static?.used === "number" && "limit" in (roomy.data?.slots?.stickers ?? {}) && typeof roomy.data?.unlocked?.banner === "boolean", "the overview shows emoji, sticker, and sound slots and what boosts unlock");
+  const marked = await callTool("list_roles");
+  expect(marked.data?.roles?.find((r) => r.bot_has && r.managed)?.bot_cannot_change === "managed by an integration", "list_roles marks the bot's own role as one it cannot change");
+  // @everyone: previewed, never confirmed here.
+  const everyonePreview = await callTool("update_role", { role: "@everyone", permissions: ["view_channel"] });
+  expect(everyonePreview.data?.executed === false && /every member of the server/.test(everyonePreview.summary ?? ""), "a change to @everyone's permissions is previewed first");
+
   // Invites.
   const invite = await callTool("create_invite", {
     channel: "general",
@@ -1649,6 +1685,11 @@ try {
     confirm_token: stickerGate.data?.confirm_token,
   });
   expect(stickerGone.data?.deleted === true, "gated sticker delete works");
+  const stickerUndoPreview = await callTool("undo_change", { change_id: stickerGone.data?.change_id });
+  await callTool("undo_change", { change_id: stickerGone.data?.change_id, confirm_token: stickerUndoPreview.data?.confirm_token });
+  expect(((await callTool("list_stickers")).data?.stickers ?? []).some((s) => s.name === "omnitest_sticker"), "a deleted sticker comes back from its saved image");
+  const stickerAgain = await callTool("delete_sticker", { sticker: "omnitest_sticker" });
+  await callTool("delete_sticker", { sticker: "omnitest_sticker", confirm_token: stickerAgain.data?.confirm_token });
 
   const soundCreate = await callToolRaw("create_soundboard_sound", {
     name: "omnitest-sound",
@@ -1676,6 +1717,11 @@ try {
       confirm_token: soundGate.data?.confirm_token,
     });
     expect(soundGone.data?.deleted === true, "gated sound delete works");
+    const soundUndoPreview = await callTool("undo_change", { change_id: soundGone.data?.change_id });
+    await callTool("undo_change", { change_id: soundGone.data?.change_id, confirm_token: soundUndoPreview.data?.confirm_token });
+    expect(((await callTool("list_soundboard_sounds")).data?.sounds ?? []).some((s) => s.name === "omnitest-sound"), "a deleted sound comes back from its saved file");
+    const soundAgain = await callTool("delete_soundboard_sound", { sound: "omnitest-sound" });
+    await callTool("delete_soundboard_sound", { sound: "omnitest-sound", confirm_token: soundAgain.data?.confirm_token });
   }
 
   // Put the server back: welcome screen off, Community off, then sweep
@@ -1966,7 +2012,7 @@ try {
     }
     expect(slowest < 35_000, "edit loop: no rename waited out a long rate limit");
     if (limited) {
-      expect(limited.data?.rate_limited === true && /not sent/.test(limited.summary ?? ""), "edit loop: the held rename is refused with the reason");
+      expect(limited.data?.rate_limited === true && /Nothing was done/.test(limited.summary ?? ""), "edit loop: the held rename is refused with the reason");
     } else {
       console.log("  note: Discord did not hold any of the renames this run");
     }
@@ -2551,9 +2597,11 @@ try {
     try {
       // A role gaining a power.
       const upPreview = await callTool("update_role", { role: "omnitest-grant-pow", permissions: ["kick_members"] });
+      // "Nobody has the role yet." comes from Discord's member counts, which
+      // are skipped rather than waited for when Discord is holding them.
       expect(
         upPreview.data?.executed === false &&
-          (upPreview.summary ?? "").includes('Would change the permissions of the role "omnitest-grant-pow" so that people with it can kick members. Nobody has the role yet.'),
+          /Would change the permissions of the role "omnitest-grant-pow" so that people with it can kick members\.( Nobody has the role yet\.)? Show the user/.test(upPreview.summary ?? ""),
         "grants: a role gaining a moderator power is previewed"
       );
       const upDone = await callTool("update_role", { role: "omnitest-grant-pow", permissions: ["kick_members"], confirm_token: upPreview.data?.confirm_token });
@@ -3051,7 +3099,15 @@ try {
 
       const plainRole = await callTool("create_role", { name: "omnitest-feat-joiner" });
       feat.roles.push(plainRole.data?.id);
-      const roles = await callTool("list_roles");
+      // Discord allows about three member counts per server every two
+      // minutes, and earlier steps use them. When they are held, list_roles
+      // says so at once instead of waiting; after the hold they come back.
+      let roles = await callTool("list_roles");
+      if (!(roles.data?.roles ?? []).some((r) => "members" in r)) {
+        expect((roles.warnings ?? []).includes("Member counts per role were not available."), "features: held member counts are said, not waited for");
+        await new Promise((r) => setTimeout(r, 110_000));
+        roles = await callTool("list_roles");
+      }
       expect((roles.data?.roles ?? []).some((r) => r.name === "omnitest-feat-joiner" && r.members === 0), "features: list_roles gives member counts");
 
       const nick = await callTool("update_bot_profile", { nickname: "omnitest nick" });

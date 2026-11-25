@@ -17,10 +17,11 @@ import {
   type GuildChannelLite,
 } from "../discord/guildData.js";
 import {
+  compareRolesLowToHigh,
   computeGuildPermissions,
   highestRolePosition,
 } from "../discord/preflight.js";
-import { resolveOne } from "../discord/resolve.js";
+import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import { describeRateLimit } from "../discord/client.js";
 import { gateDestructive } from "../safety.js";
 import { quoted } from "../discord/names.js";
@@ -195,7 +196,7 @@ export function registerStructureTools(
           .map((r) => ({ id: r.id, name: r.name, type: "role" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single role matches "${role}".`, {
+        return fail(noSingleMatch("role", "roles", role, resolution), {
           candidates: "candidates" in resolution ? resolution.candidates : [],
         });
       }
@@ -306,6 +307,14 @@ export function registerStructureTools(
       const perms = await botPermissions(rest, guildId);
       requirePermissions(perms, [[P.ManageRoles, "Manage Roles"]], "in this server");
 
+      // Discord lets a bot move only roles below its own highest role, and
+      // not to a position above it. The bot's own position number itself is
+      // allowed: Discord moves the role in just below the bot's (seen live,
+      // every acceptance run). Said here by name, since Discord's own refusal
+      // is a bare "Missing Permissions".
+      const botUser = await getBotUser(rest);
+      const botRoleIds = ((await rest.get(Routes.guildMember(guildId, botUser.id))) as APIGuildMember).roles;
+      const botTop = roles.filter((r) => botRoleIds.includes(r.id)).sort((a, b) => compareRolesLowToHigh(b, a))[0];
       const body = [];
       for (const move of moves) {
         const resolution = resolveOne(
@@ -313,7 +322,22 @@ export function registerStructureTools(
           roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
         );
         if (!("match" in resolution)) {
-          return fail(`No single role matches "${move.role}".`);
+          return fail(noSingleMatch("role", "roles", move.role, resolution));
+        }
+        const target = roles.find((r) => r.id === resolution.match.id) as APIRole;
+        if (!botTop) {
+          return fail("The bot has no role in this server, so Discord lets it move no roles. Nothing was changed.");
+        }
+        if (compareRolesLowToHigh(target, botTop) >= 0) {
+          return fail(
+            `${quoted(target.name)} is not below the bot's highest role, ${quoted(botTop.name)}, so Discord does not let the bot move it. Nothing was changed.`
+          );
+        }
+        if (move.position > botTop.position) {
+          return fail(
+            `Position ${move.position} is above the bot's highest role, ${quoted(botTop.name)} at position ${botTop.position}, ` +
+              `so Discord does not let the bot move a role there. The highest it can place a role is position ${botTop.position}. Nothing was changed.`
+          );
         }
         body.push({ id: resolution.match.id, position: move.position });
       }
@@ -440,7 +464,7 @@ export function registerStructureTools(
         roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
       );
       if (!("match" in resolution)) {
-        return fail(`No single role matches "${role}".`);
+        return fail(noSingleMatch("role", "roles", role, resolution));
       }
       const targetRole = roles.find((r) => r.id === resolution.match.id) as APIRole;
       if (targetRole.id === guildId) {
@@ -464,7 +488,7 @@ export function registerStructureTools(
           filter.has_role,
           roles.map((r) => ({ id: r.id, name: r.name, type: "role" }))
         );
-        if (!("match" in hr)) return fail(`No single role matches "${filter.has_role}".`);
+        if (!("match" in hr)) return fail(noSingleMatch("role", "roles", filter.has_role, hr));
         hasRoleId = hr.match.id;
       }
       // A date that does not parse must stop here: compared against NaN,

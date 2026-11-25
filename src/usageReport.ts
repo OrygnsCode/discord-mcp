@@ -62,6 +62,7 @@ interface State {
 export interface ReportDay {
   d: string;
   tools: Record<string, string>;
+  failed: Record<string, string>;
   gate: Record<string, string>;
   errors: Record<string, string>;
   apps: string[];
@@ -160,7 +161,7 @@ export function firstFlags(active: string[], day: string, firstSeen: string | un
 // The finished days' counts, added up across every process's file. A day
 // with a file written in the last minute waits for the next report.
 export function collectDays(dir: string, today: string, now: number = Date.now()): { days: ReportDay[]; files: string[] } {
-  const byDay = new Map<string, { tally: DayTally; files: string[]; fresh: boolean }>();
+  const byDay = new Map<string, { tally: DayTally & { failed: Record<string, number> }; files: string[]; fresh: boolean }>();
   let names: string[] = [];
   try {
     names = readdirSync(dir);
@@ -179,8 +180,9 @@ export function collectDays(dir: string, today: string, now: number = Date.now()
     } catch {
       continue;
     }
-    const entry = byDay.get(m[1]) ?? { tally: { tools: {}, gate: {}, errors: {}, apps: [] }, files: [], fresh: false };
+    const entry = byDay.get(m[1]) ?? { tally: { tools: {}, failed: {}, gate: {}, errors: {}, apps: [] }, files: [], fresh: false };
     for (const [tool, n] of Object.entries(tally.tools ?? {})) entry.tally.tools[tool] = (entry.tally.tools[tool] ?? 0) + (Number(n) || 0);
+    for (const [tool, n] of Object.entries(tally.failed ?? {})) entry.tally.failed[tool] = (entry.tally.failed[tool] ?? 0) + (Number(n) || 0);
     for (const [k, n] of Object.entries(tally.gate ?? {})) {
       const key = k as keyof DayTally["gate"];
       entry.tally.gate[key] = (entry.tally.gate[key] ?? 0) + (Number(n) || 0);
@@ -199,6 +201,7 @@ export function collectDays(dir: string, today: string, now: number = Date.now()
     days: ready.map(([d, e]) => ({
       d,
       tools: banded(e.tally.tools),
+      failed: banded(e.tally.failed),
       gate: banded(Object.fromEntries(GATE_EVENTS.filter((k) => e.tally.gate[k]).map((k) => [k, e.tally.gate[k]!]))),
       errors: banded(Object.fromEntries(ERROR_CLASSES.filter((k) => e.tally.errors[k]).map((k) => [k, e.tally.errors[k]!]))),
       apps: e.tally.apps.slice(0, 10),

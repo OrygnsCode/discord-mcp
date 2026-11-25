@@ -85,7 +85,7 @@ function applyToolsets(server: McpServer, allowed: ReadonlySet<string>): McpServ
         noteToolCall(name, { summary: String(err), data: {} });
         throw err;
       }
-      noteToolCall(name, failureOf(result));
+      noteToolCall(name, countedFailure(a[0], result));
       return result;
     };
 
@@ -132,6 +132,14 @@ function failureOf(result: unknown): { summary: string; data: unknown } | undefi
   } catch {
     return { summary: text, data: undefined };
   }
+}
+
+// The failure a call is counted with, if any. A dry run that is refused is
+// the AI checking what is possible (can this server have gradient roles?),
+// not something going wrong, so it counts as a call and not as a failure.
+export function countedFailure(args: unknown, result: unknown): { summary: string; data: unknown } | undefined {
+  if ((args as { dry_run?: unknown } | undefined)?.dry_run === true) return undefined;
+  return failureOf(result);
 }
 
 // Every tool module, in registration order.
