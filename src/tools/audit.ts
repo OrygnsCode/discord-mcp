@@ -160,7 +160,9 @@ export function registerAuditTools(server: McpServer, config: ServerConfig): voi
         "(with how many members hold it, whether they can post or join, and any " +
         "powers there), members with their own overwrite, and the owner. With " +
         "include_members, also checks every member one by one, which is exact " +
-        "where roles combine. Read only.",
+        "where roles combine. Read only. For the overwrites as set on the " +
+        "channel, use get_channel_permissions; for one member across every " +
+        "channel, get_member_access.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
@@ -279,7 +281,9 @@ export function registerAuditTools(server: McpServer, config: ServerConfig): voi
         "powers, every channel they can see (and whether they can post or join " +
         "there), channels where they hold extra powers, and how many channels " +
         "are closed to them. Read only. For why one permission is or is not " +
-        "there, use explain_permissions.",
+        "there, use explain_permissions; for their full permission list in " +
+        "one place, get_member_permissions; for everyone who can reach one " +
+        "channel, get_channel_access.",
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,

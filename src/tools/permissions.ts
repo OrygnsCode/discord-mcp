@@ -315,7 +315,9 @@ export function registerPermissionTools(
       title: "Get channel permissions",
       description:
         "The permission overwrites on a channel, resolved into plain " +
-        "language per role and member.",
+        "language per role and member. For who can actually see and use the " +
+        "channel once roles combine, use get_channel_access; to change the " +
+        "overwrites, set_channel_permissions.",
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
@@ -722,7 +724,9 @@ export function registerPermissionTools(
         "permission, server-wide or in a channel, and explain the result " +
         "through the role and overwrite chain. The answer is Discord's own " +
         "permission check when Discord gives one, so it includes the implicit " +
-        "rules (a missing View Channel cancels what depends on it).",
+        "rules (a missing View Channel cancels what depends on it). For a " +
+        "member's whole permission list, use get_member_permissions; for " +
+        "everything a member can reach, get_member_access.",
       inputSchema: {
         actor: z.string().describe('A member name or ID, or "bot".'),
         permission: z.string().describe("Permission name, like manage_messages."),

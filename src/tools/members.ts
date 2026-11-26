@@ -424,7 +424,9 @@ export function registerMemberTools(
         "The effective permissions a member has, server-wide or in a " +
         "specific channel once role and overwrite resolution is applied, " +
         "in plain language. Uses Discord's own permission check when Discord " +
-        "gives one, which includes its implicit rules; source says which.",
+        "gives one, which includes its implicit rules; source says which. " +
+        "For one permission and the reason behind it, use explain_permissions; " +
+        "for every channel a member can reach, use get_member_access.",
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
