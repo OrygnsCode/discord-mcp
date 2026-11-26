@@ -28,6 +28,8 @@ import {
   confirmTokenParam,
   messageIdParam,
   archivedThreads,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 
 // Threads: create, browse, manage state, and manage membership.
@@ -104,7 +106,7 @@ export function registerThreadTools(
       inputSchema: {
         channel: z.string().describe("Parent channel name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(100),
+        name: z.string().min(1).max(100).describe("The thread's name."),
         message_id: messageIdParam.optional()
           .describe("Branch the thread from this message (its ID or link)."),
         private: z.boolean().optional()
@@ -113,7 +115,7 @@ export function registerThreadTools(
           .literal([60, 1440, 4320, 10080])
           .optional()
           .describe("Inactivity timeout: 60, 1440, 4320, or 10080. Default 1440."),
-        slowmode_seconds: z.number().int().min(0).max(21600).optional(),
+        slowmode_seconds: z.number().int().min(0).max(21600).optional().describe("Seconds each member must wait between messages, up to 21600 (6 hours); 0 turns slowmode off."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -288,13 +290,13 @@ export function registerThreadTools(
       inputSchema: {
         thread: z.string().describe("Thread name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(100).optional(),
-        archived: z.boolean().optional(),
-        locked: z.boolean().optional(),
-        slowmode_seconds: z.number().int().min(0).max(21600).optional(),
+        name: z.string().min(1).max(100).optional().describe("New thread name."),
+        archived: z.boolean().optional().describe("true archives the thread (it leaves the active list; a new message reopens it), false unarchives it."),
+        locked: z.boolean().optional().describe("true stops members without Manage Threads from replying or unarchiving it; false lets them again."),
+        slowmode_seconds: z.number().int().min(0).max(21600).optional().describe("Seconds each member must wait between messages, up to 21600 (6 hours); 0 turns slowmode off."),
         auto_archive_minutes: z
           .literal([60, 1440, 4320, 10080])
-          .optional(),
+          .optional().describe("Archive the thread after this long without messages: 60, 1440 (one day), 4320 (three days), or 10080 (a week)."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -352,8 +354,8 @@ export function registerThreadTools(
       inputSchema: {
         thread: z.string().describe("Thread name or ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

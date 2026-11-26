@@ -51,6 +51,7 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
 } from "./common.js";
 
 // Structural conveniences: cloning channels and roles, reordering, single
@@ -182,7 +183,7 @@ export function registerStructureTools(
       inputSchema: {
         role: z.string().describe("Role name or ID to copy."),
         guild: guildParam,
-        new_name: z.string().min(1).max(100).optional(),
+        new_name: z.string().min(1).max(100).optional().describe("Name for the copy. Default: the original's name followed by \"copy\"."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -245,7 +246,7 @@ export function registerStructureTools(
                 .describe("Move under this category, or none for top level."),
             })
           )
-          .min(1),
+          .min(1).describe("The moves: each a channel by name or ID, its new position, and optionally a category to move it into."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -296,7 +297,7 @@ export function registerStructureTools(
               position: z.number().int().min(1),
             })
           )
-          .min(1),
+          .min(1).describe("The moves: each a role by name or ID and its new position. Higher numbers rank higher."),
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -434,17 +435,18 @@ export function registerStructureTools(
         "the change. Walks up to 3000 members and reports if it hits the cap.",
       inputSchema: {
         guild: guildParam,
-        action: z.enum(["assign", "remove"]),
+        action: z.enum(["assign", "remove"]).describe("assign gives the role to every matching member; remove takes it away."),
         role: z.string().describe("Role name or ID."),
         filter: z
           .object({
             has_role: z.string().optional().describe("Members holding this role."),
-            is_bot: z.boolean().optional(),
+            is_bot: z.boolean().optional().describe("true for bots only, false for people only."),
             joined_before: z.string().optional().describe("ISO date."),
             joined_after: z.string().optional().describe("ISO date."),
           })
-          .optional(),
-        dry_run: z.boolean().optional(),
+          .optional()
+          .describe("Which members: those holding a role, bots or not, or who joined before or after a date. Omit to match every member."),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

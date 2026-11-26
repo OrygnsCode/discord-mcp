@@ -27,6 +27,7 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
 } from "./common.js";
 
 // AutoMod: Discord's server-side automatic moderation rules. These run on
@@ -156,8 +157,8 @@ export function registerAutomodTools(
         "block quarantines the member until they fix their profile.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(1).max(100),
-        trigger: z.enum(["keyword", "keyword_preset", "spam", "mention_spam", "member_profile"]),
+        name: z.string().min(1).max(100).describe("The rule's name, shown in the server's AutoMod settings."),
+        trigger: z.enum(["keyword", "keyword_preset", "spam", "mention_spam", "member_profile"]).describe("What the rule catches: keyword (your own words and patterns), keyword_preset (Discord's word lists), spam (suspected spam), mention_spam (too many mentions in one message), or member_profile (words in member names)."),
         keywords: z.array(z.string().max(60)).max(1000).optional()
           .describe("For keyword rules. Wildcards: word* matches prefixes."),
         regex_patterns: z.array(z.string().max(260)).max(10).optional()
@@ -175,8 +176,8 @@ export function registerAutomodTools(
           .describe("Where alert actions post."),
         timeout_minutes: z.number().int().min(1).max(40320).optional()
           .describe("How long timeout actions last."),
-        exempt_roles: z.array(z.string()).max(20).optional(),
-        exempt_channels: z.array(z.string()).max(50).optional(),
+        exempt_roles: z.array(z.string()).max(20).optional().describe("Roles the rule does not apply to, by name or ID."),
+        exempt_channels: z.array(z.string()).max(50).optional().describe("Channels the rule does not apply to, by name or ID."),
         enabled: z.boolean().optional().describe("Default true."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -355,8 +356,8 @@ export function registerAutomodTools(
       inputSchema: {
         rule: z.string().describe("Rule name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(100).optional(),
-        enabled: z.boolean().optional(),
+        name: z.string().min(1).max(100).optional().describe("New rule name."),
+        enabled: z.boolean().optional().describe("true turns the rule on, false turns it off."),
         keywords: z.array(z.string().max(60)).max(1000).optional()
           .describe("Replaces the keyword list on keyword rules."),
         confirm_token: confirmTokenParam,
@@ -444,7 +445,7 @@ export function registerAutomodTools(
       inputSchema: {
         rule: z.string().describe("Rule name or ID."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

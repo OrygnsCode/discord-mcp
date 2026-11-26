@@ -31,7 +31,7 @@ import { highestRolePosition } from "../discord/preflight.js";
 import { gatewayKeepsCacheFresh } from "../discord/gateway.js";
 import { gateDestructive } from "../safety.js";
 import { ok, fail } from "../envelope.js";
-import { enter, guarded, guildParam, confirmTokenParam } from "./common.js";
+import { enter, guarded, guildParam, confirmTokenParam, dryRunParam } from "./common.js";
 
 // Change history and undo. Every change to a server's structure made
 // through discord-mcp leaves a record (see builder/records.ts): a build,
@@ -264,7 +264,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
         change_ids: z.array(z.string()).max(50).optional().describe("Several changes."),
         only: z.array(z.string()).min(1).max(250).optional()
           .describe("With change_id: undo only these of its items, by name or id as the preview shows them."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

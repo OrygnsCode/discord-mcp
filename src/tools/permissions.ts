@@ -47,6 +47,7 @@ import {
   requirePermissions,
   discordMemberPermissions,
   confirmTokenParam,
+  reasonParam,
 } from "./common.js";
 
 // Standalone channel permission management: read, set, and clear
@@ -537,7 +538,7 @@ export function registerPermissionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -625,7 +626,7 @@ export function registerPermissionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },

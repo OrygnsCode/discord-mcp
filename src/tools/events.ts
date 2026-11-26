@@ -29,6 +29,7 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
 } from "./common.js";
 
 // Scheduled events: voice, stage, and external.
@@ -173,8 +174,8 @@ export function registerEventTools(
         "external events need a location and an end time.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(1).max(100),
-        type: z.enum(["voice", "stage", "external"]),
+        name: z.string().min(1).max(100).describe("The event's title on the events list."),
+        type: z.enum(["voice", "stage", "external"]).describe("voice or stage for an event in that kind of channel (needs channel); external for one somewhere else (needs location and end_time)."),
         start_time: z.string().describe("ISO time, like 2026-07-01T19:00:00Z."),
         end_time: z.string().optional()
           .describe("Required for external events."),
@@ -182,7 +183,7 @@ export function registerEventTools(
           .describe("Voice or stage channel, for those event types."),
         location: z.string().max(100).optional()
           .describe("Where an external event happens."),
-        description: z.string().max(1000).optional(),
+        description: z.string().max(1000).optional().describe("Details shown on the event."),
         repeat: z.enum(["daily", "weekly", "biweekly", "monthly"]).optional()
           .describe(
             "Repeat the event. weekly and biweekly recur on the start's " +
@@ -306,12 +307,12 @@ export function registerEventTools(
       inputSchema: {
         event: z.string().describe("Event name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(100).optional(),
-        description: z.string().max(1000).optional(),
-        start_time: z.string().optional(),
-        end_time: z.string().optional(),
-        location: z.string().max(100).optional(),
-        status: z.enum(["start", "end"]).optional(),
+        name: z.string().min(1).max(100).optional().describe("New title."),
+        description: z.string().max(1000).optional().describe("New details shown on the event."),
+        start_time: z.string().optional().describe("New start, as ISO time like 2026-07-01T19:00:00Z."),
+        end_time: z.string().optional().describe("New end, as ISO time. External events must have one."),
+        location: z.string().max(100).optional().describe("Where an external event happens."),
+        status: z.enum(["start", "end"]).optional().describe("start makes the event live now; end completes it, which cannot be undone and needs confirming."),
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -419,7 +420,7 @@ export function registerEventTools(
       inputSchema: {
         event: z.string().describe("Event name or ID."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

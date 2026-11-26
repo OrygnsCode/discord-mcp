@@ -29,6 +29,7 @@ import {
   requirePermissions,
   confirmTokenParam,
   messageIdParam,
+  dryRunParam,
 } from "./common.js";
 
 // Direct messages, single-message reads, bulk deletion, crossposting, and
@@ -159,7 +160,7 @@ export function registerMessagingTools(
       inputSchema: {
         user: z.string().describe("Member name or user ID."),
         guild: guildParam,
-        content: z.string().min(1).max(2000),
+        content: z.string().min(1).max(2000).describe("The message text."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -213,7 +214,7 @@ export function registerMessagingTools(
           .describe("Only delete messages whose author name matches this."),
         contains: z.string().optional()
           .describe("Only delete messages containing this text."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -385,7 +386,7 @@ export function registerMessagingTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        content: z.string().min(1).max(2000),
+        content: z.string().min(1).max(2000).describe("The text to post."),
         send_at: z.string()
           .describe("When to send, ISO time like 2026-07-01T17:00:00Z."),
         repeat: z.enum(["none", "daily", "weekly"]).optional()
@@ -476,9 +477,9 @@ export function registerMessagingTools(
         "gone for good, and a repeat stops, so the first call returns a " +
         "preview and a confirm_token; repeating the call with the token cancels it.",
       inputSchema: {
-        schedule_id: z.string(),
+        schedule_id: z.string().describe("The id schedule_message returned, also shown by list_scheduled_messages."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

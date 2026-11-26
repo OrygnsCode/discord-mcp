@@ -34,6 +34,8 @@ import {
   requirePermissions,
   botPermissions,
   confirmTokenParam,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 
 // Moderation tools. Every punitive action (timeout, kick, ban, bulk ban)
@@ -152,8 +154,8 @@ export function registerModerationTools(
         guild: guildParam,
         duration_minutes: z.number().int().min(1).max(40320)
           .describe("Timeout length in minutes, up to 40320 (28 days)."),
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -218,7 +220,7 @@ export function registerModerationTools(
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -278,8 +280,8 @@ export function registerModerationTools(
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -334,10 +336,10 @@ export function registerModerationTools(
       inputSchema: {
         user: z.string().describe("Member name, or a user ID for someone not in the server."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
         delete_message_seconds: z.number().int().min(0).max(604800).optional()
           .describe("Also delete their messages from the last N seconds, up to 604800 (7 days)."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -452,7 +454,7 @@ export function registerModerationTools(
       inputSchema: {
         user_id: z.string().describe("The banned user's ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -517,9 +519,9 @@ export function registerModerationTools(
         user_ids: z.array(z.string().regex(SNOWFLAKE)).min(1).max(200)
           .describe("User IDs to ban."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        delete_message_seconds: z.number().int().min(0).max(604800).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        delete_message_seconds: z.number().int().min(0).max(604800).optional().describe("Also delete each banned user's messages from this many seconds back, up to 604800 (7 days). Default 0, nothing deleted."),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

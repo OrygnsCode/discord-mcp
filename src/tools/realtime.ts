@@ -145,7 +145,7 @@ export function registerRealtimeTools(
       description:
         "Read and clear buffered events from a subscription, oldest first.",
       inputSchema: {
-        subscription_id: z.string(),
+        subscription_id: z.string().describe("The id subscribe_events returned, also shown by list_event_subscriptions."),
         limit: z.number().int().min(1).max(100).optional()
           .describe("Max events to return. Default 25."),
       },
@@ -200,7 +200,9 @@ export function registerRealtimeTools(
     {
       title: "Unsubscribe from events",
       description: "Stop recording and discard a subscription's buffer.",
-      inputSchema: { subscription_id: z.string() },
+      inputSchema: {
+        subscription_id: z.string().describe("The id subscribe_events returned, also shown by list_event_subscriptions."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     guarded(async ({ subscription_id }) => {

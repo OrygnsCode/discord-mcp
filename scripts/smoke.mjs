@@ -110,6 +110,14 @@ try {
 
   const tools = await request("tools/list", {});
   const names = (tools.result?.tools ?? []).map((t) => t.name);
+  // The description is all an AI reads before it picks a tool and fills in
+  // its settings, so every setting says what it is for.
+  const undescribed = (tools.result?.tools ?? []).flatMap((t) =>
+    Object.entries(t.inputSchema?.properties ?? {})
+      .filter(([, schema]) => typeof schema.description !== "string" || schema.description.trim() === "")
+      .map(([key]) => `${t.name}.${key}`)
+  );
+  assert(undescribed.length === 0, `every tool setting has a description (${undescribed.join(", ") || "all do"})`);
   assert(names.includes("get_bot_info"), "get_bot_info is registered");
   assert(names.includes("run_setup_check"), "run_setup_check is registered");
   assert(names.includes("send_message"), "send_message is registered");

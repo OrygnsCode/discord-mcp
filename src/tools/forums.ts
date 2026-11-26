@@ -27,6 +27,8 @@ import {
   mapEmbeds,
   confirmTokenParam,
   archivedThreads,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 
 // Forum channels: posts are threads underneath, tags live on the channel.
@@ -114,8 +116,8 @@ export function registerForumTools(
       inputSchema: {
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
-        title: z.string().min(1).max(100),
-        content: z.string().min(1).max(2000),
+        title: z.string().min(1).max(100).describe("The post's title, shown in the forum's list."),
+        content: z.string().min(1).max(2000).describe("The opening message of the post."),
         tags: z.array(z.string()).max(5).optional()
           .describe("Tag names to apply."),
         files: filesParam,
@@ -182,7 +184,7 @@ export function registerForumTools(
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
         tag: z.string().optional().describe("Only posts carrying this tag."),
-        include_archived: z.boolean().optional(),
+        include_archived: z.boolean().optional().describe("Also list archived posts. Default false: active posts only."),
       },
       annotations: { readOnlyHint: true },
     },
@@ -274,12 +276,12 @@ export function registerForumTools(
       inputSchema: {
         post: z.string().describe("Post title or thread ID."),
         guild: guildParam,
-        title: z.string().min(1).max(100).optional(),
+        title: z.string().min(1).max(100).optional().describe("New title."),
         tags: z.array(z.string()).max(5).optional()
           .describe("Replace the applied tags with these."),
-        pinned: z.boolean().optional(),
-        locked: z.boolean().optional(),
-        archived: z.boolean().optional(),
+        pinned: z.boolean().optional().describe("true pins the post at the top of the forum, false unpins it."),
+        locked: z.boolean().optional().describe("true stops members without Manage Threads from replying, false lets them again."),
+        archived: z.boolean().optional().describe("true archives the post, false brings it back to the active list."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -338,8 +340,8 @@ export function registerForumTools(
       inputSchema: {
         post: z.string().describe("Post title or thread ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -383,8 +385,8 @@ export function registerForumTools(
       inputSchema: {
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(20),
-        moderated: z.boolean().optional(),
+        name: z.string().min(1).max(20).describe("The tag's name, up to 20 characters."),
+        moderated: z.boolean().optional().describe("If true, only members with Manage Threads can put this tag on a post. Default false."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -434,8 +436,8 @@ export function registerForumTools(
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
         tag: z.string().describe("Current tag name."),
-        name: z.string().min(1).max(20).optional(),
-        moderated: z.boolean().optional(),
+        name: z.string().min(1).max(20).optional().describe("New name, up to 20 characters."),
+        moderated: z.boolean().optional().describe("If true, only members with Manage Threads can put this tag on a post."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -488,7 +490,7 @@ export function registerForumTools(
         forum: z.string().describe("Forum channel name or ID."),
         guild: guildParam,
         tag: z.string().describe("Tag name to remove."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

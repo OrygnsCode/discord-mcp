@@ -14,7 +14,7 @@ import {
 import { gateDestructive } from "../safety.js";
 import { quoted } from "../discord/names.js";
 import { ok, fail } from "../envelope.js";
-import { enter, enterBot, guarded, guildParam, hiddenChannelSummary, confirmTokenParam } from "./common.js";
+import { enter, enterBot, guarded, guildParam, hiddenChannelSummary, confirmTokenParam, dryRunParam } from "./common.js";
 import { Routes } from "discord-api-types/v10";
 import { DiscordAPIError } from "@discordjs/rest";
 import { templateCode, templateSettings, templateToLive, type SerializedTemplateGuild } from "../builder/template.js";
@@ -46,9 +46,9 @@ export function registerBlueprintTools(
         "servers with execute_build_plan or track drift with " +
         "diff_blueprint. Names are unique.",
       inputSchema: {
-        name: z.string().min(1).max(100),
-        description: z.string().max(300).optional(),
-        blueprint: blueprintSchema,
+        name: z.string().min(1).max(100).describe("The name to save it under. Names are unique in the store."),
+        description: z.string().max(300).optional().describe("A note about what the blueprint is for."),
+        blueprint: blueprintSchema.describe("The server layout to save: name, theme, roles, categories, and channels, in the shape plan_server_build takes and export_server_blueprint returns."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -119,7 +119,7 @@ export function registerBlueprintTools(
         "it. Servers built from it are untouched.",
       inputSchema: {
         blueprint: z.string().describe("Blueprint name or ID."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

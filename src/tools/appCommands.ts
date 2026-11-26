@@ -12,7 +12,7 @@ import type { ServerConfig } from "../config.js";
 import { gateDestructive } from "../safety.js";
 import { ok, fail } from "../envelope.js";
 import { settingSource } from "../settings.js";
-import { enter, enterBot, guarded, guildParam, botParam, ToolProblem, confirmTokenParam } from "./common.js";
+import { enter, enterBot, guarded, guildParam, botParam, ToolProblem, confirmTokenParam, dryRunParam } from "./common.js";
 
 // Slash commands belong to the Discord application, not to a server, so these
 // tools authorise on owning the application rather than on a guild permission.
@@ -279,7 +279,7 @@ export function registerAppCommandTools(server: McpServer, config: ServerConfig)
         command: z.string().describe("Command name or ID."),
         guild: guildParam,
         bot: botParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

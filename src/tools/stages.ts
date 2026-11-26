@@ -15,6 +15,7 @@ import {
   resolveChannel,
   botPermissions,
   requirePermissions,
+  dryRunParam,
 } from "./common.js";
 
 // Stage instances: the live "now speaking" session on a stage channel.
@@ -63,7 +64,7 @@ export function registerStageTools(
       inputSchema: {
         channel: z.string().describe("Stage channel name or ID."),
         guild: guildParam,
-        topic: z.string().min(1).max(120),
+        topic: z.string().min(1).max(120).describe("What the stage is about, shown to everyone listening."),
         notify: z.boolean().optional()
           .describe("Notify members that the stage started. Needs Mention Everyone."),
       },
@@ -99,7 +100,7 @@ export function registerStageTools(
       inputSchema: {
         channel: z.string().describe("Stage channel name or ID."),
         guild: guildParam,
-        topic: z.string().min(1).max(120),
+        topic: z.string().min(1).max(120).describe("The new topic."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -130,7 +131,7 @@ export function registerStageTools(
       inputSchema: {
         channel: z.string().describe("Stage channel name or ID."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

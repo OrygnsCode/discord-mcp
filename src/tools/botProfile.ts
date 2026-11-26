@@ -25,6 +25,7 @@ import {
   guildParam,
   requirePermissions,
   ToolProblem,
+  dryRunParam,
 } from "./common.js";
 
 // The bot itself: how it looks, in one server or everywhere, and which
@@ -112,7 +113,7 @@ export function registerBotProfileTools(server: McpServer, config: ServerConfig)
           .describe("The profile banner from the local files folder, by name, instead of banner_url."),
         bio: z.string().max(190).optional()
           .describe("Server only: the About Me shown in that server, or none. The bot's own About Me is set in the Developer Portal."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },

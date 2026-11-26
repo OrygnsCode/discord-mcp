@@ -51,6 +51,8 @@ import {
   mapEmbeds,
   confirmTokenParam,
   postWithFiles,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 import { filesParam, prepareFiles, type PreparedFiles } from "../discord/uploads.js";
 
@@ -179,7 +181,7 @@ export function registerCommunityTools(
           .describe("Role names or IDs given to everyone who joins with this invite. Needs Manage Roles."),
         for_users: z.array(z.string().regex(/^\d{17,20}$/, "a Discord user ID")).min(1).max(1000).optional()
           .describe("User IDs of the only people who can use it (up to 1000). They need not be in the server yet."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -425,8 +427,8 @@ export function registerCommunityTools(
       inputSchema: {
         code: z.string().describe("The invite code to revoke."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -491,7 +493,7 @@ export function registerCommunityTools(
         "Webhooks in the server or one channel. Tokens are never included.",
       inputSchema: {
         guild: guildParam,
-        channel: z.string().optional(),
+        channel: z.string().optional().describe("Only this channel's webhooks, by name or ID. Omit for the whole server."),
       },
       annotations: { readOnlyHint: true },
     },
@@ -531,7 +533,7 @@ export function registerCommunityTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(80),
+        name: z.string().min(1).max(80).describe("The webhook's display name. send_webhook_message can override it for a single message."),
         avatar_url: z.string().url().optional()
           .describe("Image for the webhook's default avatar, up to 1 MB."),
       },
@@ -568,10 +570,10 @@ export function registerCommunityTools(
       inputSchema: {
         webhook: z.string().describe("Webhook name or ID."),
         guild: guildParam,
-        name: z.string().min(1).max(80).optional(),
+        name: z.string().min(1).max(80).optional().describe("New display name."),
         channel: z.string().optional()
           .describe("Move the webhook to this channel."),
-        avatar_url: z.string().url().optional(),
+        avatar_url: z.string().url().optional().describe("Public link to an image that becomes the webhook's avatar."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -622,8 +624,8 @@ export function registerCommunityTools(
       inputSchema: {
         webhook: z.string().describe("Webhook name or ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -665,10 +667,10 @@ export function registerCommunityTools(
       inputSchema: {
         webhook: z.string().describe("Webhook name or ID."),
         guild: guildParam,
-        content: z.string().min(1).max(2000).optional(),
+        content: z.string().min(1).max(2000).optional().describe("The message text."),
         embeds: embedsParam,
-        username_override: z.string().min(1).max(80).optional(),
-        avatar_url_override: z.string().url().optional(),
+        username_override: z.string().min(1).max(80).optional().describe("Display name for this message only, instead of the webhook's own."),
+        avatar_url_override: z.string().url().optional().describe("Public link to an avatar image for this message only."),
         files: filesParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -770,7 +772,7 @@ export function registerCommunityTools(
       inputSchema: {
         guild: guildParam,
         name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/,
-          "Letters, digits, and underscores only.").optional(),
+          "Letters, digits, and underscores only.").optional().describe("The emoji's name: letters, digits and underscores. Needed for one upload with image_url or image_file; with emojis, each item has its own name."),
         image_url: z.string().url().optional()
           .describe("Public http or https link to the image file itself."),
         image_file: z.string().min(1).optional()
@@ -884,7 +886,7 @@ export function registerCommunityTools(
       inputSchema: {
         emoji: z.string().optional().describe("Current emoji name or ID."),
         guild: guildParam,
-        name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/).optional(),
+        name: z.string().min(2).max(32).regex(/^[A-Za-z0-9_]+$/).optional().describe("The new name: letters, digits and underscores. Needed with emoji for one rename; with renames, each item has its own."),
         renames: z
           .array(
             z.object({
@@ -952,7 +954,7 @@ export function registerCommunityTools(
         emojis: z.array(z.string()).min(1).max(250).optional()
           .describe("Several emoji to delete together, by name or ID, instead of emoji."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

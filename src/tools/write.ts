@@ -73,6 +73,7 @@ import {
   confirmTokenParam,
   postWithFiles,
   messageIdParam,
+  dryRunParam,
 } from "./common.js";
 import { sameOverwriteList } from "../builder/categorySync.js";
 import { filesParam, prepareFiles, unreferencedFiles, type PreparedFiles } from "../discord/uploads.js";
@@ -454,7 +455,7 @@ export function registerWriteTools(
           .describe("Channel topic, for text-like channels."),
         slowmode_seconds: z.number().int().min(0).max(21600).optional()
           .describe("Per-user message cooldown."),
-        nsfw: z.boolean().optional(),
+        nsfw: z.boolean().optional().describe("Mark the channel age-restricted (NSFW). Default false."),
         private_to: z.array(z.string()).max(20).optional()
           .describe(
             "Role names that can see the channel. Everyone else is denied " +
@@ -725,7 +726,7 @@ export function registerWriteTools(
         color: z.string().optional().describe("Hex color like #00b0f4."),
         hoist: z.boolean().optional()
           .describe("Show members separately in the sidebar."),
-        mentionable: z.boolean().optional(),
+        mentionable: z.boolean().optional().describe("Whether anyone can @mention the role. Default false."),
         ...roleAppearanceFields,
         dry_run: z.boolean().optional()
           .describe("Preview without creating."),
@@ -1004,7 +1005,7 @@ export function registerWriteTools(
         message_id: messageIdParam.describe("The message to delete: its ID or link."),
         reason: z.string().max(400).optional()
           .describe("Audit log reason."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

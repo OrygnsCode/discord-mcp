@@ -30,6 +30,8 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 
 // Member administration: nickname and voice state edits, removing a role,
@@ -61,11 +63,11 @@ export function registerMemberTools(
         guild: guildParam,
         nickname: z.string().max(32).optional()
           .describe("New nickname, or empty string to clear it."),
-        server_mute: z.boolean().optional(),
-        server_deafen: z.boolean().optional(),
+        server_mute: z.boolean().optional().describe("true server-mutes the member in voice, false unmutes. Only while they are in a voice channel."),
+        server_deafen: z.boolean().optional().describe("true server-deafens the member in voice, false undeafens. Only while they are in a voice channel."),
         move_to_voice: z.string().optional()
           .describe("Voice channel name or ID to move the member into."),
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -215,7 +217,7 @@ export function registerMemberTools(
       inputSchema: {
         member: z.string().describe("Member name or user ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
+        reason: reasonParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -294,8 +296,8 @@ export function registerMemberTools(
         member: z.string().describe("Member name or user ID."),
         role: z.string().describe("Role name or ID."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },

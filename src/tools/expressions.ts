@@ -34,6 +34,7 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
 } from "./common.js";
 
 // Stickers and soundboard sounds. Two different upload mechanics:
@@ -149,7 +150,7 @@ export function registerExpressionTools(
         "with five sticker slots; boosts add more.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(2).max(30),
+        name: z.string().min(2).max(30).describe("The sticker's name, 2 to 30 characters."),
         description: z.string().max(100).optional()
           .describe("Empty or 2-100 characters."),
         tags: z.string().min(1).max(200)
@@ -227,9 +228,9 @@ export function registerExpressionTools(
       inputSchema: {
         sticker: z.string().describe("Sticker name or ID."),
         guild: guildParam,
-        name: z.string().min(2).max(30).optional(),
-        description: z.string().max(100).optional(),
-        tags: z.string().min(1).max(200).optional(),
+        name: z.string().min(2).max(30).optional().describe("New name, 2 to 30 characters."),
+        description: z.string().max(100).optional().describe("New description, up to 100 characters."),
+        tags: z.string().min(1).max(200).optional().describe("A word or standard emoji Discord uses to suggest the sticker."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -272,7 +273,7 @@ export function registerExpressionTools(
         stickers: z.array(z.string()).min(1).max(60).optional()
           .describe("Several stickers to delete together, by name or ID, instead of sticker."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -341,7 +342,7 @@ export function registerExpressionTools(
         "boosts add more.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(2).max(32),
+        name: z.string().min(2).max(32).describe("The sound's name, 2 to 32 characters."),
         sound_url: z.string().url().optional()
           .describe("Public http or https link to the sound file itself."),
         sound_file: z.string().min(1).optional()
@@ -422,8 +423,8 @@ export function registerExpressionTools(
       inputSchema: {
         sound: z.string().describe("Sound name or ID."),
         guild: guildParam,
-        name: z.string().min(2).max(32).optional(),
-        volume: z.number().min(0).max(1).optional(),
+        name: z.string().min(2).max(32).optional().describe("New name, 2 to 32 characters."),
+        volume: z.number().min(0).max(1).optional().describe("Playback volume from 0 to 1, where 1 is full volume."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -468,7 +469,7 @@ export function registerExpressionTools(
         sounds: z.array(z.string()).min(1).max(60).optional()
           .describe("Several sounds to delete together, by name or ID, instead of sound."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

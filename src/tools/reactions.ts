@@ -28,6 +28,7 @@ import {
   requirePermissions,
   confirmTokenParam,
   messageIdParam,
+  dryRunParam,
 } from "./common.js";
 
 // Reactions and polls.
@@ -133,7 +134,7 @@ export function registerReactionTools(
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
         message_id: messageIdParam,
-        emoji: z.string(),
+        emoji: z.string().describe("The reaction to remove. A standard emoji (the character itself), or one of this server's custom emoji by name, like party or :party:, or as <:party:ID>."),
         user: z.string().optional()
           .describe("Whose reaction to remove; omit for the bot's own."),
       },
@@ -190,7 +191,7 @@ export function registerReactionTools(
         message_id: messageIdParam,
         emoji: z.string().optional()
           .describe("Only clear this emoji; omit to clear everything."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -256,7 +257,7 @@ export function registerReactionTools(
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
         message_id: messageIdParam,
-        emoji: z.string(),
+        emoji: z.string().describe("The reaction to list. A standard emoji (the character itself), or one of this server's custom emoji by name, like party or :party:, or as <:party:ID>."),
         limit: z.number().int().min(1).max(100).optional()
           .describe("Max users. Default 25."),
       },
@@ -308,8 +309,8 @@ export function registerReactionTools(
       inputSchema: {
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
-        question: z.string().min(1).max(300),
-        answers: z.array(z.string().min(1).max(55)).min(2).max(10),
+        question: z.string().min(1).max(300).describe("The question at the top of the poll."),
+        answers: z.array(z.string().min(1).max(55)).min(2).max(10).describe("The choices members vote on, two to ten, each up to 55 characters."),
         duration_hours: z.number().int().min(1).max(768).optional()
           .describe("How long the poll runs. Default 24."),
         multi_select: z.boolean().optional()
@@ -466,7 +467,7 @@ export function registerReactionTools(
         channel: z.string().describe("Channel name or ID."),
         guild: guildParam,
         message_id: messageIdParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },

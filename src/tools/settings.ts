@@ -32,6 +32,8 @@ import {
   botPermissions,
   requirePermissions,
   confirmTokenParam,
+  dryRunParam,
+  reasonParam,
 } from "./common.js";
 
 // Guild settings: identity, widget, welcome screen, onboarding,
@@ -96,14 +98,14 @@ export function registerSettingsTools(
         "Raising them, and every other setting, happens at once.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(2).max(100).optional(),
-        description: z.string().max(300).optional(),
+        name: z.string().min(2).max(100).optional().describe("New server name."),
+        description: z.string().max(300).optional().describe("The server's description, shown in Server Discovery and on invites (Community servers)."),
         verification_level: z
           .enum(["none", "low", "medium", "high", "very_high"])
-          .optional(),
+          .optional().describe("What members need before they can talk: none; low, a verified email; medium, also registered for 5 minutes; high, also a member for 10 minutes; very_high, a verified phone."),
         afk_timeout_seconds: z
           .literal([60, 300, 900, 1800, 3600])
-          .optional(),
+          .optional().describe("How long a member can be idle in voice before being moved to the AFK channel."),
         afk_channel: z.string().optional()
           .describe("Voice channel name or ID, or none to clear."),
         system_channel: z.string().optional()
@@ -133,7 +135,7 @@ export function registerSettingsTools(
           .describe("Which members' images Discord scans for explicit content."),
         default_notifications: z.enum(["all_messages", "only_mentions"]).optional()
           .describe("What new members are notified of by default."),
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -482,7 +484,7 @@ export function registerSettingsTools(
         "Turning it off or clearing the channel happens at once.",
       inputSchema: {
         guild: guildParam,
-        enabled: z.boolean().optional(),
+        enabled: z.boolean().optional().describe("true turns the public widget on, false turns it off."),
         channel: z.string().optional()
           .describe("Invite channel name or ID, or none to clear."),
         confirm_token: confirmTokenParam,
@@ -599,8 +601,8 @@ export function registerSettingsTools(
         "five channel cards.",
       inputSchema: {
         guild: guildParam,
-        enabled: z.boolean().optional(),
-        description: z.string().max(140).optional(),
+        enabled: z.boolean().optional().describe("Whether new members see the welcome screen."),
+        description: z.string().max(140).optional().describe("The text at the top of the welcome screen."),
         channels: z
           .array(
             z.object({
@@ -609,7 +611,7 @@ export function registerSettingsTools(
             })
           )
           .max(5)
-          .optional(),
+          .optional().describe("Up to five channel cards, each a channel and a short line about it. Replaces the current cards."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -703,7 +705,7 @@ export function registerSettingsTools(
         "and a confirm_token, and repeating the call with the token saves it.",
       inputSchema: {
         guild: guildParam,
-        enabled: z.boolean().optional(),
+        enabled: z.boolean().optional().describe("true turns onboarding on, false turns it off."),
         mode: z.enum(["default", "advanced"]).optional()
           .describe(
             "default counts only default channels toward the constraints; " +
@@ -735,7 +737,7 @@ export function registerSettingsTools(
             })
           )
           .max(15)
-          .optional(),
+          .optional().describe("The questions new members answer; each option grants channels and roles. Replaces the current prompts."),
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
@@ -931,8 +933,8 @@ export function registerSettingsTools(
       inputSchema: {
         integration_id: z.string().regex(/^\d{17,20}$/, "An integration ID is 17 to 20 digits.").describe("Integration ID from list_integrations."),
         guild: guildParam,
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -1003,8 +1005,8 @@ export function registerSettingsTools(
         "can create servers from. One template per server.",
       inputSchema: {
         guild: guildParam,
-        name: z.string().min(1).max(100),
-        description: z.string().max(120).optional(),
+        name: z.string().min(1).max(100).describe("The template's name."),
+        description: z.string().max(120).optional().describe("A short description shown with the template."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
@@ -1059,7 +1061,7 @@ export function registerSettingsTools(
       inputSchema: {
         code: z.string().regex(TEMPLATE_REF, "A template code is letters, digits, and dashes, or a discord.new link.").describe("Template code, or its discord.new link."),
         guild: guildParam,
-        dry_run: z.boolean().optional(),
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -1106,8 +1108,8 @@ export function registerSettingsTools(
         guild: guildParam,
         days: z.number().int().min(1).max(30)
           .describe("Inactivity threshold in days."),
-        reason: z.string().max(400).optional(),
-        dry_run: z.boolean().optional(),
+        reason: reasonParam,
+        dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
       },
       annotations: { readOnlyHint: false, destructiveHint: true },
@@ -1197,7 +1199,7 @@ export function registerSettingsTools(
         "Change the bot's status dot and custom status text. Needs the " +
         "gateway connection this server keeps by default.",
       inputSchema: {
-        status: z.enum(["online", "idle", "dnd", "invisible"]),
+        status: z.enum(["online", "idle", "dnd", "invisible"]).describe("online, idle, dnd (do not disturb), or invisible (shows as offline)."),
         activity_text: z.string().max(128).optional()
           .describe("Custom status text shown under the bot's name."),
       },
