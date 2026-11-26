@@ -167,10 +167,7 @@ export const reasonParam = z
   .string()
   .max(400)
   .optional()
-  .describe(
-    "Shown as the reason in the server's audit log, up to 400 characters. " +
-      "Without it, the log says the change came through discord-mcp."
-  );
+  .describe("The reason recorded in the server's audit log.");
 
 // A tool's answer, or (from the safety gate) a request that the app ask the
 // user something first and then call again.
