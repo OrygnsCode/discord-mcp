@@ -5,7 +5,7 @@ import { buildServer } from "./server.js";
 import { startHttpServer } from "./http.js";
 import { PACKAGE_ROOT } from "./home.js";
 import { npxCacheWarning } from "./install.js";
-import { startBackgroundWork, watchForRealConnection } from "./lifecycle.js";
+import { exitWhenClientLeaves, startBackgroundWork, watchForRealConnection } from "./lifecycle.js";
 import { setting } from "./settings.js";
 
 // Entry point. Two transports:
@@ -89,6 +89,17 @@ if (http) {
   // Attached after serveStdio so the transport's own stdin listener is
   // already in place. See lifecycle.ts for why the start waits.
   watchForRealConnection(process.stdin, () => void startBackgroundWork(config));
+  exitWhenClientLeaves({
+    input: process.stdin,
+    output: process.stdout,
+    log: process.stderr,
+    signals: process,
+    stop: async () => {
+      const { stopGateway } = await import("./discord/gateway.js");
+      await stopGateway();
+    },
+    exit: (code) => process.exit(code),
+  });
   console.error(
     `discord-mcp v${VERSION} on stdio` +
       (config.toolsets.all

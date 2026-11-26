@@ -574,6 +574,22 @@ try {
     "upgrade: prints the Claude Code commands it cannot run itself"
   );
 
+  // The app going away ends the server: closing its input is what an app
+  // does when it quits, and the process says why and exits on its own.
+  let leaveLog = "";
+  child.stderr.on("data", (d) => (leaveLog += d.toString()));
+  const leftAt = Date.now();
+  const leftCode = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("still running"), 10000);
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+    child.stdin.end();
+  });
+  assert(leftCode === 0 && Date.now() - leftAt < 8000, `leave: the server exits once the app closes its input (${leftCode})`);
+  assert(leaveLog.includes("the app closed the connection, so the server is stopping"), "leave: and says why on its log");
+
   console.log("smoke: all assertions passed");
   child.kill();
   process.exit(0);

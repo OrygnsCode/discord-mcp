@@ -33,6 +33,7 @@ import { registerBotProfileTools } from "./tools/botProfile.js";
 import { registerAuditTools } from "./tools/audit.js";
 import { registerCatchUpTools } from "./tools/catchUp.js";
 import { noteClient, noteToolCall } from "./usageStats.js";
+import { whileRunning } from "./lifecycle.js";
 
 // Applies the toolset selection, the request scope the safety gate reads,
 // and the answer to a parameter a tool does not have, without touching the
@@ -80,7 +81,7 @@ function applyToolsets(server: McpServer, allowed: ReadonlySet<string>): McpServ
       noteClient(clientName(a[a.length - 1]));
       let result: unknown;
       try {
-        result = await callback(...a);
+        result = await whileRunning(async () => callback(...a));
       } catch (err) {
         noteToolCall(name, { summary: String(err), data: {} });
         throw err;

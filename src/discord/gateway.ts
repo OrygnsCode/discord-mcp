@@ -30,6 +30,9 @@ export type GatewayState =
 
 let state: GatewayState = { status: "off", reason: "not started" };
 let manager: WebSocketManager | undefined;
+// Set while stopGateway closes the connection on purpose, so the close is not
+// logged as a drop that will be retried.
+let stopping = false;
 let portalIntents: IntentStatus | undefined;
 // The REST client of the bot this connection runs as (the default bot).
 // Gateway-only knowledge, such as which channels are hidden from the bot,
@@ -154,6 +157,10 @@ export async function startGateway(config: ServerConfig): Promise<void> {
       state = next;
     });
     manager.on(WebSocketShardEvents.Closed, (code) => {
+      if (stopping) {
+        console.error("discord-mcp gateway closed");
+        return;
+      }
       const next = stateAfterClose(code, state);
       const gaveUp = next.status === "error" && state.status !== "error";
       state = next;
@@ -209,12 +216,14 @@ export async function setPresence(options: {
 
 export async function stopGateway(): Promise<void> {
   if (manager) {
+    stopping = true;
     try {
       await manager.destroy();
     } catch {
       // Already down; nothing to release.
     }
     manager = undefined;
+    stopping = false;
   }
   state = { status: "off", reason: "stopped" };
 }

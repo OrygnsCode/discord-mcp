@@ -2323,6 +2323,99 @@ try {
   check(calls === 1, "lifecycle: it starts once, then stops listening");
 }
 
+// --- lifecycle: the server ends when the app goes away ---
+{
+  const { exitWhenClientLeaves, whileRunning, callsRunning } = await import("../dist/lifecycle.js");
+  const { PassThrough } = await import("node:stream");
+  const { EventEmitter } = await import("node:events");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rig = (extra = {}) => {
+    const io = { input: new PassThrough(), output: new PassThrough(), log: new PassThrough(), signals: new EventEmitter() };
+    const seen = { stops: 0, exits: [], order: [], logText: "" };
+    io.log.on("data", (c) => (seen.logText += c));
+    const leave = exitWhenClientLeaves({
+      ...io,
+      stop: async () => { seen.stops++; seen.order.push("stop"); },
+      exit: (code) => { seen.exits.push(code); seen.order.push("exit"); },
+      graceMs: 200,
+      closeLimitMs: 100,
+      ...extra,
+    });
+    return { io, seen, leave };
+  };
+
+  let r = rig();
+  r.io.input.end();
+  r.io.input.resume();
+  await sleep(30);
+  check(r.seen.stops === 1 && r.seen.exits.join() === "0" && r.seen.order.join() === "stop,exit", "leave: when the app closes the pipe, the connection is closed and the process exits");
+  check(/the app closed the connection, so the server is stopping/.test(r.seen.logText), `leave: and the log says why (${r.seen.logText.trim()})`);
+  r.io.input.emit("close");
+  await sleep(10);
+  check(r.seen.stops === 1 && r.seen.exits.length === 1, "leave: a second signal does not stop it twice");
+
+  r = rig();
+  let finished = false;
+  const work = whileRunning(async () => { await sleep(80); finished = true; return "done"; });
+  check(callsRunning() === 1, "leave: a running call is counted");
+  r.io.input.end();
+  r.io.input.resume();
+  await sleep(20);
+  check(r.seen.stops === 0 && r.seen.exits.length === 0, "leave: a running call holds the stop back");
+  check((await work) === "done" && finished, "leave: the call gets to finish its work");
+  await sleep(20);
+  check(r.seen.order.join() === "stop,exit" && callsRunning() === 0, "leave: then it stops and exits");
+
+  r = rig();
+  let stuckDone;
+  const stuck = whileRunning(() => new Promise((resolve) => (stuckDone = resolve)));
+  const t0 = Date.now();
+  r.io.input.end();
+  r.io.input.resume();
+  await sleep(260);
+  check(r.seen.exits.length === 1 && Date.now() - t0 < 600, "leave: a call that never ends is not waited for past the grace period");
+  stuckDone();
+  await stuck;
+
+  r = rig({ stop: () => new Promise(() => {}) });
+  r.io.input.end();
+  r.io.input.resume();
+  await sleep(360);
+  check(r.seen.exits.join() === "0", "leave: if closing the connection hangs, it exits anyway");
+
+  r = rig();
+  await whileRunning(async () => { throw new Error("boom"); }).catch(() => undefined);
+  check(callsRunning() === 0, "leave: a call that throws is not left counted");
+
+  r = rig();
+  r.io.output.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+  await sleep(30);
+  check(r.seen.exits.length === 1 && /stopped reading/.test(r.seen.logText), "leave: the app no longer reading the output ends it too");
+
+  r = rig();
+  r.io.signals.emit("SIGTERM");
+  await sleep(30);
+  check(r.seen.exits.length === 1 && /asked it to stop/.test(r.seen.logText), "leave: so does SIGTERM");
+  r = rig();
+  r.io.signals.emit("SIGINT");
+  await sleep(30);
+  check(r.seen.exits.length === 1, "leave: and SIGINT");
+
+  r = rig();
+  r.io.log.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+  await sleep(30);
+  check(r.seen.exits.length === 0 && r.seen.stops === 0, "leave: an app that closes the log keeps the server running");
+  r.io.log.destroy();
+  r.io.input.end();
+  r.io.input.resume();
+  await sleep(30);
+  check(r.seen.exits.length === 1, "leave: and with the log gone, leaving still works");
+
+  r = rig();
+  await r.leave();
+  check(r.seen.order.join() === "stop,exit", "leave: it can also be asked directly");
+}
+
 // --- scheduler: claims keep two copies from sending the same message ---
 {
   const os = await import("node:os");
