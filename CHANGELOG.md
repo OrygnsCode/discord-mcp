@@ -5,6 +5,21 @@ The format follows Keep a Changelog, and the project follows semantic
 versioning. Version 1.0.0 marked the public launch; releases since follow
 semver.
 
+## 2.2.1 (2026-11-26)
+
+### Fixed
+
+- The server now stops when the app that started it goes away (it closes
+  the connection, crashes, or asks it to stop). Before, the Discord
+  connection could keep it running in the background, with the bot still
+  online.
+- An app that closes the server's log no longer takes the server down.
+
+### Changed
+
+- Every tool setting now has a description, and the permission tools say
+  which one to use when.
+
 ## 2.2.0 (2026-11-25)
 
 ### Added
