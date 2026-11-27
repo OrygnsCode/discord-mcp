@@ -50,6 +50,9 @@ export interface ScheduledMessage {
   // again; it stays listed so the failure is seen instead of the message
   // quietly vanishing.
   failed?: string;
+  // When it failed. A one-shot that failed is removed this long after
+  // (FAILED_KEPT_MS), so a message that can never go out does not stay forever.
+  failed_at?: string;
 }
 
 function storeDir(): string {
@@ -292,6 +295,7 @@ async function tick(config: ServerConfig): Promise<void> {
   running = true;
   try {
     recoverStaleClaims();
+    pruneFailed();
     for (const listed of listSchedules()) {
       if (new Date(listed.send_at).getTime() > Date.now()) continue;
       if (listed.failed && listed.repeat === "none") continue;
@@ -358,7 +362,8 @@ async function fireOne(rest: ReturnType<typeof getRest>, id: string): Promise<vo
       // again every tick would never work. A one-shot stays listed, marked
       // failed; a repeat waits for its next time.
       if (schedule.repeat === "none") {
-        writeFileSync(fileFor(schedule.id), JSON.stringify({ ...schedule, failed: reason }, null, 2) + "\n");
+        const failed = { ...schedule, failed: reason, failed_at: new Date().toISOString() };
+        writeFileSync(fileFor(schedule.id), JSON.stringify(failed, null, 2) + "\n");
         unlinkSync(claim);
       } else {
         completeClaim({ ...schedule, failed: reason }, claim);
@@ -379,6 +384,36 @@ function logFailure(id: string, err: unknown): void {
       err instanceof Error ? err.message : String(err)
     }`
   );
+}
+
+// How long a one-shot that could not be sent stays listed (marked failed),
+// so it is seen, before it is removed.
+export const FAILED_KEPT_MS = 30 * 86_400_000;
+
+function failedSince(s: ScheduledMessage): number | undefined {
+  if (!s.failed || s.repeat !== "none") return undefined;
+  const at = Date.parse(s.failed_at ?? s.send_at);
+  return Number.isFinite(at) ? at : undefined;
+}
+
+// Removes the one-shots that failed longer ago than FAILED_KEPT_MS.
+export function pruneFailed(now: number = Date.now()): number {
+  let removed = 0;
+  for (const s of listSchedules()) {
+    const since = failedSince(s);
+    if (since !== undefined && now - since >= FAILED_KEPT_MS && cancelSchedule(s.id)) removed += 1;
+  }
+  return removed;
+}
+
+// When the next failed one-shot is due to be removed.
+export function nextCleanup(): number | undefined {
+  let next: number | undefined;
+  for (const s of listSchedules()) {
+    const since = failedSince(s);
+    if (since !== undefined && (next === undefined || since + FAILED_KEPT_MS < next)) next = since + FAILED_KEPT_MS;
+  }
+  return next;
 }
 
 // Exposed for unit tests only.

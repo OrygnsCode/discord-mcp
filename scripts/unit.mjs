@@ -2539,7 +2539,20 @@ try {
     const before = posted.one.length;
     await sched.tick(cfg);
     check(posted.one.length === before, "scheduler: neither is tried again on the next tick");
-    cancelSchedule(lost.id);
+
+    // A one-shot that could not be sent is removed after 30 days; a repeat never is.
+    const { pruneFailed, nextCleanup, FAILED_KEPT_MS } = await import("../dist/scheduler.js");
+    const failedAt = Date.parse(getSchedule(lost.id).failed_at);
+    check(Number.isFinite(failedAt) && Math.abs(failedAt - Date.now()) < 60_000, "scheduler: a one-shot that failed records when");
+    check(nextCleanup() === failedAt + FAILED_KEPT_MS, "scheduler: its removal is due 30 days after it failed");
+    check(pruneFailed(failedAt + FAILED_KEPT_MS - 1) === 0 && getSchedule(lost.id) !== undefined, "scheduler: within the 30 days it stays listed");
+    check(pruneFailed(failedAt + FAILED_KEPT_MS) === 1 && getSchedule(lost.id) === undefined && getSchedule(weekly.id) !== undefined, "scheduler: after them it is removed, and the failed repeat is kept");
+    check(nextCleanup() === undefined, "scheduler: then nothing is due to be removed");
+    const older = saveSchedule({ ...base, content: "from before", sendAt: past(), repeat: "none", bot: "one" });
+    const olderPath = path.join(dir, `${older.id}.json`);
+    fs.writeFileSync(olderPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(olderPath, "utf8")), failed: "Missing Access" }));
+    const olderSince = Date.parse(getSchedule(older.id).send_at);
+    check(nextCleanup() === olderSince + FAILED_KEPT_MS && pruneFailed(olderSince + FAILED_KEPT_MS) === 1, "scheduler: one marked failed before the time was recorded counts from its send time");
     cancelSchedule(weekly.id);
 
     // Cancelling while a send is under way.
