@@ -19,7 +19,8 @@ import {
 import {
   compareRolesLowToHigh,
   computeGuildPermissions,
-  highestRolePosition,
+  belowRole,
+  highestRole,
 } from "../discord/preflight.js";
 import { resolveOne, noSingleMatch } from "../discord/resolve.js";
 import { describeRateLimit } from "../discord/client.js";
@@ -475,9 +476,9 @@ export function registerStructureTools(
       if (targetRole.managed) {
         return fail(`${quoted(targetRole.name)} belongs to an integration and cannot be given or taken by hand.`);
       }
-      const botTop = highestRolePosition(botMember.roles, roles);
+      const botTop = highestRole(botMember.roles, roles);
       // Discord lets a bot hand out only roles strictly below its highest.
-      if (targetRole.position >= botTop) {
+      if (!belowRole(targetRole, botTop)) {
         return fail(
           `${quoted(targetRole.name)} is not below the bot's highest role, so the bot ` +
             "cannot manage it. Move the bot's role higher."

@@ -35,7 +35,9 @@ import {
 } from "../builder/overwrites.js";
 import {
   computeGuildPermissions,
-  highestRolePosition,
+  belowRole,
+  highestRole,
+  notBelowBot,
   parsePermissionNames,
   describePermissions,
   listPermissionNames,
@@ -897,25 +899,12 @@ export function registerWriteTools(
         "in this server"
       );
 
-      // Hierarchy: a bot can only manage roles strictly below its own
-      // highest role, unless it is an administrator... and even then
-      // Discord enforces hierarchy for role assignment. Equal positions
-      // are ambiguous; warn and let Discord arbitrate.
+      // Hierarchy: a bot can only hand out roles strictly below its own
+      // highest role, Administrator or not. Roles at one position rank by
+      // age (preflight.ts), so a tie is decided, not guessed.
       const warnings: string[] = [];
-      const botTop = highestRolePosition(botMember.roles, roles);
-      if (targetRole.position > botTop) {
-        return fail(
-          `The bot's highest role (position ${botTop}) is below ` +
-            `${quoted(targetRole.name)} (position ${targetRole.position}). Discord ` +
-            "will reject this. Move the bot's role above the target role."
-        );
-      }
-      if (targetRole.position === botTop) {
-        warnings.push(
-          "The target role shares the bot's highest position; Discord may " +
-            "reject the assignment."
-        );
-      }
+      const botTop = highestRole(botMember.roles, roles);
+      if (!belowRole(targetRole, botTop)) return fail(notBelowBot(targetRole, botTop));
 
       // What the role hands them. Powers, or channels hidden from them now,
       // wait for the user's confirmation: "give me the Staff role" is the

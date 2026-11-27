@@ -538,6 +538,12 @@ check(modEqual.ok === false, "equal role position rejected for moderation");
 
 const modLower = canModerate({ ...modBase, targetId: "900000000000000003", targetTopPosition: 2 });
 check(modLower.ok === true, "strictly lower target allowed");
+// With the roles known, a tie goes to the older role, as in Discord.
+const tieOlderBot = canModerate({ ...modBase, targetId: "900000000000000003", targetTopPosition: 5, botTopRoleId: "900000000000000201", targetTopRoleId: "900000000000000209" });
+check(tieOlderBot.ok === true, "a tie where the bot's role is older: allowed");
+const tieOlderTarget = canModerate({ ...modBase, targetId: "900000000000000003", targetTopPosition: 5, botTopRoleId: "900000000000000209", targetTopRoleId: "900000000000000201" });
+check(tieOlderTarget.ok === false && /share a position, and the target's is the older role/.test(tieOlderTarget.reason), "a tie where the target's role is older: refused, and why");
+check(canModerate({ ...modBase, targetId: "900000000000000003", targetTopPosition: 5, botTopRoleId: "900000000000000201", targetTopRoleId: "900000000000000201" }).ok === false, "the same role on both: refused");
 
 // Overwrite compiler (builder)
 
@@ -1810,6 +1816,13 @@ check(compareRolesLowToHigh(newer, older) < 0, "on a tied position the newer id 
 check(compareRolesLowToHigh(older, newer) > 0, "on a tied position the older id sorts higher");
 check(compareRolesLowToHigh(older, older) === 0, "a role compares equal to itself");
 check(compareRolesLowToHigh({ id: "1", position: 2 }, { id: "999", position: 5 }) < 0, "a lower position sorts lower whatever the ids");
+{
+  const { highestRole, belowRole, notBelowBot } = await import("../dist/discord/preflight.js");
+  const roles = [older, newer, { id: "900000000000000102", position: 0 }];
+  check(highestRole([newer.id, older.id], roles) === older && highestRole([], roles) === undefined, "highest role: the older of two tied roles, none for no roles");
+  check(belowRole(newer, older) && !belowRole(older, newer) && !belowRole(older, older) && !belowRole(newer, undefined), "below: strictly, by the same order; nothing is below no role");
+  check(/is the bot's own highest role/.test(notBelowBot(older, older)) && /has no role here/.test(notBelowBot(older, undefined)) && /Discord will reject this/.test(notBelowBot({ id: "5", position: 9 }, older)), "below: each refusal says why");
+}
 check(compareRolesLowToHigh({ id: "999", position: 5 }, { id: "1", position: 2 }) > 0, "a higher position sorts higher whatever the ids");
 
 // Three roles parked at position 1 by Discord, created low, mid, high. The
@@ -4770,6 +4783,22 @@ try {
   check(env(await call("update_role", { role: "Helper", permissions: ["view_channel", "send_messages"] })).summary.startsWith('Updated role "Helper"'), "update_role: ordinary permissions everyone has go ahead at once");
   reset();
   check(env(await call("update_role", { role: "Moderator", permissions: ["kick_members"] })).summary.startsWith('Updated role "Moderator"'), "update_role: taking powers away goes ahead at once");
+
+  // A tie in position is decided as Discord decides it: the older role ranks
+  // higher. Helper is older than the bot's role, Newer is not.
+  reset();
+  {
+    state.roles.find((r) => r.id === BOTROLE).position = 1;
+    state.roles.push({ id: "940000000000000199", name: "Newer", permissions: "0", position: 1 });
+    const older = env(await call("update_role", { role: "Helper", color: "#00ff00" }));
+    check(/"Helper" shares position 1 with the bot's highest role, "Bot", and ranks above it/.test(older.summary) && /Discord will reject this/.test(older.summary) && state.roles.find((r) => r.id === HELPER).color === undefined, `rank: a role tied with the bot's and older than it is refused, nothing sent (${older.summary})`);
+    const newer = env(await call("update_role", { role: "Newer", color: "#00ff00" }));
+    check(newer.summary.startsWith('Updated role "Newer"') && newer.warnings.length === 0, `rank: one tied with it and newer is changed, with no warning about a tie (${newer.summary} ${newer.warnings.join(" | ")})`);
+    const give = env(await call("assign_role", { member: ALICE, role: "Newer" }));
+    check(give.summary.startsWith('Gave "Newer" to "Alice"') && give.warnings.every((w) => !/position/.test(w)), `rank: and can be given (${give.summary})`);
+    const refuse = env(await call("assign_role", { member: ALICE, role: "Helper" }));
+    check(/ranks above it/.test(refuse.summary) && !state.members[ALICE].roles.includes(HELPER), "rank: the older one cannot be given");
+  }
 
   // set_channel_permissions and clear_channel_permissions
   reset();

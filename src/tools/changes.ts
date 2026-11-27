@@ -27,7 +27,7 @@ import {
   getRoles,
   invalidateGuildCaches,
 } from "../discord/guildData.js";
-import { highestRolePosition } from "../discord/preflight.js";
+import { highestRole } from "../discord/preflight.js";
 import { gatewayKeepsCacheFresh } from "../discord/gateway.js";
 import { gateDestructive } from "../safety.js";
 import { ok, fail } from "../envelope.js";
@@ -197,7 +197,7 @@ async function undoLive(rest: REST, guildId: string, records: BuildRecord[]): Pr
     ...(stickers ? { stickers } : {}),
     ...(sounds ? { sounds } : {}),
     aliases: loadAliases(guildId),
-    botTop: highestRolePosition(member.roles, roles),
+    botTop: highestRole(member.roles, roles) ?? { id: "0", position: 0 },
     roleMemberCounts,
   };
 }

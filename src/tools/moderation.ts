@@ -17,7 +17,7 @@ import type { ServerConfig } from "../config.js";
 import { getRoles, getBotUser } from "../discord/guildData.js";
 import {
   computeGuildPermissions,
-  highestRolePosition,
+  highestRole,
   canModerate,
 } from "../discord/preflight.js";
 import { gateDestructive } from "../safety.js";
@@ -98,13 +98,16 @@ async function preflightModeration(
   if (!target.user) {
     throw new ToolProblem(fail(`Could not load member "${memberQuery}".`));
   }
+  const targetTop = highestRole(target.roles, roles);
+  const botTop = highestRole(botMember.roles, roles);
   const verdict = canModerate({
     action,
     targetId: target.user.id,
-    targetTopPosition: highestRolePosition(target.roles, roles),
+    targetTopPosition: targetTop?.position ?? 0,
     botId: botUser.id,
-    botTopPosition: highestRolePosition(botMember.roles, roles),
+    botTopPosition: botTop?.position ?? 0,
     ownerId: guildData.owner_id,
+    ...(targetTop && botTop ? { targetTopRoleId: targetTop.id, botTopRoleId: botTop.id } : {}),
   });
   if (!verdict.ok) {
     throw new ToolProblem(fail(verdict.reason ?? "Moderation not allowed."));
@@ -391,13 +394,16 @@ export function registerModerationTools(
       let targetLabel: string;
       let inServer = true;
       if (member?.user) {
+        const targetTop = highestRole(member.roles, roles);
+        const botTop = highestRole(botMember.roles, roles);
         const verdict = canModerate({
           action: "ban",
           targetId: member.user.id,
-          targetTopPosition: highestRolePosition(member.roles, roles),
+          targetTopPosition: targetTop?.position ?? 0,
           botId: botUser.id,
-          botTopPosition: highestRolePosition(botMember.roles, roles),
+          botTopPosition: botTop?.position ?? 0,
           ownerId: guildData.owner_id,
+          ...(targetTop && botTop ? { targetTopRoleId: targetTop.id, botTopRoleId: botTop.id } : {}),
         });
         if (!verdict.ok) return fail(verdict.reason ?? "Ban not allowed.");
         targetId = member.user.id;

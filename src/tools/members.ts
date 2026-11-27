@@ -7,7 +7,9 @@ import { getRoles, getBotUser } from "../discord/guildData.js";
 import {
   computeGuildPermissions,
   computeChannelPermissions,
-  highestRolePosition,
+  belowRole,
+  highestRole,
+  notBelowBot,
   describePermissions,
   ALL_PERMISSIONS,
 } from "../discord/preflight.js";
@@ -337,21 +339,9 @@ export function registerMemberTools(
       )) as APIGuildMember;
       const botPerms = computeGuildPermissions(botMember.roles, guildId, roles);
       requirePermissions(botPerms, [[P.ManageRoles, "Manage Roles"]], "in this server");
-      const botTop = highestRolePosition(botMember.roles, roles);
+      const botTop = highestRole(botMember.roles, roles);
       const warnings: string[] = [];
-      if (targetRole.position > botTop) {
-        return fail(
-          `The bot's highest role (position ${botTop}) is below ` +
-            `${quoted(targetRole.name)} (position ${targetRole.position}). Discord ` +
-            "will reject this. Move the bot's role higher."
-        );
-      }
-      if (targetRole.position === botTop) {
-        warnings.push(
-          "The target role shares the bot's highest position; Discord may " +
-            "reject the change."
-        );
-      }
+      if (!belowRole(targetRole, botTop)) return fail(notBelowBot(targetRole, botTop));
 
       // A role can deny as well as allow. Without it, the member may see
       // channels the role hid from them, or regain a power it took away.

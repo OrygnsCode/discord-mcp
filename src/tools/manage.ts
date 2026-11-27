@@ -18,7 +18,9 @@ import {
 } from "../discord/guildData.js";
 import {
   computeGuildPermissions,
-  highestRolePosition,
+  belowRole,
+  highestRole,
+  notBelowBot,
   parsePermissionNames,
   describePermissions,
   listPermissionNames,
@@ -173,24 +175,11 @@ async function resolveManageableRole(
   const botPerms = computeGuildPermissions(botMember.roles, guildId, roles);
   requirePermissions(botPerms, [[P.ManageRoles, "Manage Roles"]], "in this server");
 
-  const warnings: string[] = [];
-  const botTop = highestRolePosition(botMember.roles, roles);
-  if (role.position > botTop) {
-    throw new ToolProblem(
-      fail(
-        `The bot's highest role (position ${botTop}) is below ${quoted(role.name)} ` +
-          `(position ${role.position}). Discord will reject this. Move the ` +
-          "bot's role above the target role."
-      )
-    );
-  }
-  if (role.position === botTop) {
-    warnings.push(
-      "The target role shares the bot's highest position; Discord may " +
-        "reject the change."
-    );
-  }
-  return { role, warnings };
+  // Only roles strictly below the bot's highest, in Discord's order (roles
+  // at one position rank by age), so a tie is decided, not guessed.
+  const botTop = highestRole(botMember.roles, roles);
+  if (!belowRole(role, botTop)) throw new ToolProblem(fail(notBelowBot(role, botTop)));
+  return { role, warnings: [] };
 }
 
 export function registerManageTools(

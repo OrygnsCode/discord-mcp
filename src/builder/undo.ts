@@ -2,11 +2,17 @@ import { quoted } from "../discord/names.js";
 import { Routes } from "discord-api-types/v10";
 import type { REST } from "@discordjs/rest";
 import type { GuildChannelLite } from "../discord/guildData.js";
-import { describePermissions, type RoleLite } from "../discord/preflight.js";
+import { belowRole, describePermissions, type RoleLite } from "../discord/preflight.js";
 import { describeRateLimit } from "../discord/client.js";
 import { isImageField } from "../discord/images.js";
 import { entryChannelType, itemLabel, type BuildRecord, type ItemKind, type Overwrite, type RecordEntry } from "./records.js";
 import { holdCandidates, stuckFrom, stuckWarning, syncedWith, withSyncedHeld } from "./categorySync.js";
+
+// Whether the bot can still change a role: strictly below its highest. A
+// position alone (no id) is compared by position.
+function roleBelowBot(role: { id: string; position: number }, top: number | { id: string; position: number }): boolean {
+  return typeof top === "number" ? role.position < top : belowRole(role, top);
+}
 
 // Undoing a build, from its record. Planning is pure and conservative:
 //
@@ -37,8 +43,10 @@ export interface UndoLive {
   roles: RoleLite[];
   // Server settings that point at channels, by Discord field name.
   guildSettings: Record<string, string | null | undefined>;
-  // The bot's highest role position; roles at or above it cannot be edited.
-  botTop?: number;
+  // The bot's highest role; roles not strictly below it cannot be edited
+  // (preflight.ts belowRole). A number is a position alone (older records
+  // of the shape, and tests).
+  botTop?: number | { id: string; position: number };
   // Members per role, where known.
   roleMemberCounts?: Record<string, number>;
   // The server's own settings, for undoing a server settings change.
@@ -286,7 +294,7 @@ export function planUndo(record: BuildRecord, live: UndoLive): UndoAction[] {
         restores.push({ type: "skip", entry: i, name: e.name, lines: [`${label(e.kind, e.name, tOf(e))} no longer exists, so its changes cannot be undone.`] });
         return;
       }
-      if (e.kind === "role" && live.botTop !== undefined && Number(now.position ?? 0) >= live.botTop) {
+      if (e.kind === "role" && live.botTop !== undefined && !roleBelowBot({ id: e.id, position: Number(now.position ?? 0) }, live.botTop)) {
         restores.push({ type: "skip", entry: i, name: e.name, lines: [`${label(e.kind, e.name, tOf(e))} is now at or above the bot's highest role, so the bot cannot change it back.`] });
         return;
       }

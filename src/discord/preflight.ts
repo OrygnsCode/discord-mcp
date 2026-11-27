@@ -1,4 +1,5 @@
 import { PermissionFlagsBits } from "discord-api-types/v10";
+import { quoted } from "./names.js";
 
 // Permission math, kept pure so it can be unit tested without a network.
 // Implements Discord's documented resolution order: base permissions from
@@ -31,6 +32,43 @@ export function compareRolesLowToHigh(
   if (a.position !== b.position) return a.position - b.position;
   if (a.id === b.id) return 0;
   return BigInt(a.id) > BigInt(b.id) ? -1 : 1;
+}
+
+// A member's highest role in that order; undefined when they hold none but
+// @everyone.
+export function highestRole<R extends { id: string; position: number }>(
+  memberRoleIds: readonly string[],
+  roles: readonly R[]
+): R | undefined {
+  let top: R | undefined;
+  for (const role of roles) {
+    if (memberRoleIds.includes(role.id) && (!top || compareRolesLowToHigh(role, top) > 0)) top = role;
+  }
+  return top;
+}
+
+// Whether a role is strictly below a member's highest role, which is what
+// Discord asks before that member (a bot included) may manage it.
+export function belowRole(
+  role: { id: string; position: number },
+  top: { id: string; position: number } | undefined
+): boolean {
+  return top !== undefined && compareRolesLowToHigh(role, top) < 0;
+}
+
+// Why a role is not below the bot's highest, for a refusal. `top` is the
+// bot's highest role.
+export function notBelowBot(role: { id: string; position: number; name?: string }, top: { id: string; position: number; name?: string } | undefined): string {
+  const name = quoted(role.name ?? role.id);
+  if (!top) return `The bot has no role here, so it cannot manage ${name}. Give the bot a role above it.`;
+  if (top.id === role.id) return `${name} is the bot's own highest role; Discord lets a bot manage only roles below its highest.`;
+  if (role.position > top.position) {
+    return `The bot's highest role (position ${top.position}) is below ${name} (position ${role.position}). Discord will reject this. Move the bot's role above the target role.`;
+  }
+  return (
+    `${name} shares position ${top.position} with the bot's highest role, ${quoted(top.name ?? top.id)}, and ranks above it ` +
+    "(between roles at one position, the older ranks higher). Discord will reject this. Move the bot's role above it."
+  );
 }
 
 export interface OverwriteLite {
@@ -128,6 +166,10 @@ export function canModerate(input: {
   botId: string;
   botTopPosition: number;
   ownerId: string;
+  // The two highest roles' ids, when they hold one: at one position, the
+  // older role ranks higher (compareRolesLowToHigh).
+  targetTopRoleId?: string;
+  botTopRoleId?: string;
 }): ModerationCheck {
   if (input.targetId === input.botId) {
     return { ok: false, reason: `The bot cannot ${input.action} itself.` };
@@ -144,12 +186,19 @@ export function canModerate(input: {
       reason: `The server owner cannot be ${verb} by anyone.`,
     };
   }
-  if (input.targetTopPosition >= input.botTopPosition) {
+  const below =
+    input.targetTopRoleId !== undefined && input.botTopRoleId !== undefined
+      ? belowRole({ id: input.targetTopRoleId, position: input.targetTopPosition }, { id: input.botTopRoleId, position: input.botTopPosition })
+      : input.targetTopPosition < input.botTopPosition;
+  if (!below) {
+    const tie = input.targetTopPosition === input.botTopPosition && input.targetTopRoleId !== undefined && input.botTopRoleId !== undefined;
     return {
       ok: false,
       reason:
         `The target's highest role (position ${input.targetTopPosition}) ` +
-        `is not below the bot's (position ${input.botTopPosition}). Discord ` +
+        `is not below the bot's (position ${input.botTopPosition})` +
+        (tie ? " (they share a position, and the target's is the older role, which ranks higher)" : "") +
+        `. Discord ` +
         `only allows moderating members with strictly lower roles. Move ` +
         `the bot's role up or the target's down.`,
     };

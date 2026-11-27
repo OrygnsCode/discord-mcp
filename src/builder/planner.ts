@@ -4,7 +4,8 @@ import type { GuildChannelLite } from "../discord/guildData.js";
 import {
   computeChannelPermissions,
   describePermissions,
-  highestRolePosition,
+  belowRole,
+  highestRole,
   parsePermissionNames,
   PERMISSION_PRESETS,
   ALL_PERMISSIONS,
@@ -417,9 +418,10 @@ export function buildPlan(
 
   // What the bot can do in one existing channel, for edits. Administrator
   // bypasses overwrites; otherwise the channel's own overwrites decide.
+  // The bot's highest role; null when the bot's roles are not known.
   const botTop =
     live.botRoleIds !== undefined
-      ? highestRolePosition(live.botRoleIds, live.roles)
+      ? highestRole(live.botRoleIds, live.roles)
       : null;
   function botCan(channel: GuildChannelLite): bigint {
     if (isAdmin || !live.botUserId || !live.botRoleIds) return live.botPermissions;
@@ -543,7 +545,7 @@ export function buildPlan(
       );
       return;
     }
-    if (botTop !== null && existing.position >= botTop) {
+    if (botTop !== null && !belowRole(existing, botTop)) {
       errors.push(
         `The ${label} sits at or above the bot's highest role, so Discord will not ` +
           "let the bot edit it. Move the bot's role above it first."
@@ -1337,7 +1339,7 @@ export function buildPlan(
         errors.push(`${label} is managed by an integration (a bot or a subscription); Discord does not allow deleting it.`);
         continue;
       }
-      if (botTop !== null && r.position >= botTop) {
+      if (botTop !== null && !belowRole(r, botTop)) {
         errors.push(`${label} sits at or above the bot's highest role, so Discord will not let the bot delete it.`);
         continue;
       }
