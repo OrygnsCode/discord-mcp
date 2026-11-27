@@ -74,6 +74,9 @@ the controls that contain the damage:
 - Member-written content always arrives as clearly labeled data, separated
   from the tool's own descriptions, so the AI is steered to treat it as
   information rather than commands.
+- Characters that hide words from a person while an AI still reads them
+  (Unicode tag characters, direction overrides) are taken out of what the
+  tools return, and the AI is told when that happened.
 - The confirmation gate above is the backstop. A hostile message might
   mislead the AI, but a deletion or a ban stops at a preview, and in an app
   that shows the confirmation dialog only you can let it through.

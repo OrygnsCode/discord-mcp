@@ -5,6 +5,35 @@ The format follows Keep a Changelog, and the project follows semantic
 versioning. Version 1.0.0 marked the public launch; releases since follow
 semver.
 
+## 2.2.2 (2026-11-27)
+
+### Fixed
+
+- A crafted interlaced PNG used for an emoji, sticker or role icon could
+  expand to gigabytes while it was being made smaller and take the server
+  down. Its data is now checked against the size it claims before it is
+  decoded.
+- Text from Discord can hide words a person can't see but an AI still
+  reads (Unicode tag characters, direction overrides). Those characters are
+  now taken out of what tools return, with a warning saying how many.
+- get_invite no longer reads which roles an invite gives, or who it's
+  limited to, for a server outside DISCORD_MCP_ALLOWED_SERVERS.
+- A very long name in undo_change's only could keep the server busy for a
+  long time. Names there are capped at 200 characters.
+- Two roles at the same position are ranked the way Discord ranks them,
+  the older one higher. Before, some tools warned that Discord "may reject"
+  the change and others refused it.
+- The server overview no longer counts categories as channels.
+
+### Changed
+
+- A one-time scheduled message that couldn't be sent is removed 30 days
+  after it failed.
+- A build that's cut off partway can still be undone as far as it got.
+- The undo confirmation says how many steps it takes.
+- With DISCORD_MCP_GATEWAY=off, notes about hidden channels say the live
+  connection is off instead of pointing at the default bot.
+
 ## 2.2.1 (2026-11-26)
 
 ### Fixed

@@ -65,12 +65,12 @@ bytes each:
 
 | Setting | Tools | Payload | Tokens | Saved |
 |---|---|---|---|---|
-| unset (everything) | 164 | 205,478 B | ~51,400 | |
+| unset (everything) | 164 | 205,494 B | ~51,400 | |
 | `core` only | 15 | 11,992 B | ~3,000 | 94% |
 | `messaging` | 36 | 43,325 B | ~10,800 | 79% |
 | `builder` | 26 | 44,117 B | ~11,000 | 79% |
 | `messaging,moderation` | 53 | 63,652 B | ~15,900 | 69% |
-| `messaging,moderation,structure` | 81 | 101,540 B | ~25,400 | 51% |
+| `messaging,moderation,structure` | 81 | 101,556 B | ~25,400 | 51% |
 | `DISCORD_MCP_READ_ONLY=true` | 60 | 49,984 B | ~12,500 | 76% |
 | read-only with `messaging,moderation` | 24 | 18,303 B | ~4,600 | 91% |
 
@@ -100,7 +100,7 @@ In stdio mode the startup line on stderr also names the active groups, so you
 can confirm what a session loaded:
 
 ```
-discord-mcp v2.2.1 on stdio (toolsets: core, messaging, moderation)
+discord-mcp v2.2.2 on stdio (toolsets: core, messaging, moderation)
 ```
 
 ## Adding a tool
