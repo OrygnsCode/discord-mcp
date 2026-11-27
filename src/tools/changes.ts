@@ -351,6 +351,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
         skip ? `leave ${skip} as they are` : "",
       ].filter(Boolean).join(", ");
       if (anything) {
+        const stepLines = previews.flatMap((p) => p.actions.flatMap((a) => a.lines));
         const gate = gateDestructive({
           tool: "undo_change",
           args: { changes: records.map((r) => r.buildId), guild: guildId, plan: planKey, only: selected ? [...selected].sort((a, b) => a - b) : null },
@@ -360,13 +361,15 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
             `Would undo ${label}: ${counts}` +
             (records.length > 1 ? " (each change is checked again when its turn comes)" : "") +
             ".",
+          // The person reads the steps themselves under this, so it says how
+          // many there are rather than counting them by kind.
           dialogSummary:
             (records.length === 1
               ? `Undo the change made ${when(records[0])}`
               : `Undo ${records.length} changes, newest first, made from ${when(records[records.length - 1])} to ${when(records[0])}`) +
-            `: ${counts}.`,
+            `, in ${stepLines.length} step${stepLines.length === 1 ? "" : "s"}:`,
           note: "The preview lists every step; when you show it, show each line.",
-          dialogLines: previews.flatMap((p) => p.actions.flatMap((a) => a.lines)),
+          dialogLines: stepLines,
           previewDetails: previews.map((p) => ({
             change_id: p.record.buildId,
             ...(p.record.tool ? { by: p.record.tool } : {}),

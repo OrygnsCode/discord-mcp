@@ -2786,7 +2786,7 @@ try {
       const undone = await dCall("undo_change", { change_id: yes.data?.change_id, confirm_token: up.data?.confirm_token });
       expect(/Recreate #omnitest-dlg-a/.test(shown.at(-1) ?? ""), "dialog: the undo's dialog lists its steps");
       expect(
-        /\nUndo the change made \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC: recreate 1\./.test(shown.at(-1) ?? "") &&
+        /\nUndo the change made \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, in 1 step:/.test(shown.at(-1) ?? "") &&
           !/delete_channel/.test(shown.at(-1) ?? ""),
         "dialog: the undo's dialog says it plainly, without the tool name"
       );
