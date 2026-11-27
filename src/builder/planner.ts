@@ -42,7 +42,7 @@ import {
   type Extras,
 } from "./compare.js";
 import { gateBitsFor, gateBitsForType, SEND_FAMILY } from "./overwrites.js";
-import { setting } from "../settings.js";
+import { hiddenKnownOnlyThrough } from "../discord/hiddenChannels.js";
 
 // The planner. Takes a blueprint plus a snapshot of the live server and
 // produces either an ordered, executable plan or a list of everything
@@ -1143,7 +1143,7 @@ export function buildPlan(
     const seen = new Set<string>();
     const hiddenNote =
       hidden === undefined
-        ? " It may also exist but be hidden from the bot, which only the default bot's gateway connection can tell."
+        ? ` It may also exist but be hidden from the bot; only ${hiddenKnownOnlyThrough()} can tell.`
         : hidden.length > 0
           ? ` ${hidden.length} channel(s) are hidden from the bot and cannot be removed by it.`
           : "";
@@ -1485,9 +1485,7 @@ export function buildPlan(
   if (hidden === undefined) {
     warnings.push(
       "Channels hidden from the bot could not be checked for name clashes: whether any " +
-        (setting("GATEWAY")?.toLowerCase() === "off"
-          ? "exist is only known through the live connection to Discord, which is turned off here."
-          : "exist is only known through the gateway connection of the default bot.")
+        `exist is only known through ${hiddenKnownOnlyThrough()}.`
     );
   } else if (hidden.length > 0) {
     warnings.push(

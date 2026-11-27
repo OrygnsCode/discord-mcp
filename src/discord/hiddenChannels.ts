@@ -1,4 +1,14 @@
 import { ChannelFlags, GatewayDispatchEvents } from "discord-api-types/v10";
+import { setting } from "../settings.js";
+
+// What alone could tell whether channels are hidden from the bot, for a
+// sentence saying it is not known: the default bot's gateway connection, or,
+// with that turned off, nothing here.
+export function hiddenKnownOnlyThrough(): string {
+  return setting("GATEWAY")?.toLowerCase() === "off"
+    ? "the live connection to Discord, which is turned off here"
+    : "the default bot's gateway connection";
+}
 
 // Channels the bot cannot see.
 //

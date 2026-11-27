@@ -15,6 +15,7 @@ import { gateDestructive } from "../safety.js";
 import { quoted } from "../discord/names.js";
 import { ok, fail } from "../envelope.js";
 import { enter, enterBot, guarded, guildParam, hiddenChannelSummary, confirmTokenParam, dryRunParam } from "./common.js";
+import { hiddenKnownOnlyThrough } from "../discord/hiddenChannels.js";
 import { Routes } from "discord-api-types/v10";
 import { DiscordAPIError } from "@discordjs/rest";
 import { templateCode, templateSettings, templateToLive, type SerializedTemplateGuild } from "../builder/template.js";
@@ -213,7 +214,7 @@ export function registerBlueprintTools(
       } else if (hidden.count === null) {
         warnings.push(
           "Any channels hidden from the bot (no View Channel) are not in this export; whether " +
-            "there are any is only known through the default bot's gateway connection."
+            `there are any is only known through ${hiddenKnownOnlyThrough()}.`
         );
       }
 
@@ -379,7 +380,7 @@ export function registerBlueprintTools(
         } else if (hidden.count === null) {
           notes.push(
             "A channel listed as missing may exist but be hidden from the bot (no View " +
-              "Channel); that is only known through the default bot's gateway connection."
+              `Channel); that is only known through ${hiddenKnownOnlyThrough()}.`
           );
         }
       }

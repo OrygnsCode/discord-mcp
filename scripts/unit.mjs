@@ -2232,6 +2232,17 @@ try {
     else process.env.DISCORD_MCP_GATEWAY = saved;
     check(/live connection to Discord, which is turned off here/.test(warned) && !/default bot/.test(warned), "planner: with the live connection turned off, the warning says that instead");
   }
+  {
+    // Every "not known whether any are hidden" sentence uses the same words.
+    const { hiddenKnownOnlyThrough } = await import("../dist/discord/hiddenChannels.js");
+    const saved = process.env.DISCORD_MCP_GATEWAY;
+    const on = hiddenKnownOnlyThrough();
+    process.env.DISCORD_MCP_GATEWAY = "off";
+    const off = hiddenKnownOnlyThrough();
+    if (saved === undefined) delete process.env.DISCORD_MCP_GATEWAY;
+    else process.env.DISCORD_MCP_GATEWAY = saved;
+    check(on === "the default bot's gateway connection" && off === "the live connection to Discord, which is turned off here", "hidden: where it could be known, with the gateway on and off");
+  }
 }
 
 // --- Discord's growth thresholds, split in June 2026 ---
