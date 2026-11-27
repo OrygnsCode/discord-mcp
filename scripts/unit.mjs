@@ -2223,7 +2223,15 @@ try {
   check(overTotal.errors.some((e) => e.includes("channel limit")), "planner: hidden channels count toward the server's channel limit");
   check(fits.warnings.every((w) => !w.includes("hidden")), "planner: no hidden-channel warning when none are hidden");
   check(overCategory.warnings.some((w) => w.includes("49 channel(s) in this server are hidden")), "planner: warns how many are hidden and why it matters");
-  check(buildPlan(twoMore, live(undefined)).warnings.some((w) => w.includes("could not be checked")), "planner: warns when it is unknown whether any are hidden");
+  check(buildPlan(twoMore, live(undefined)).warnings.some((w) => w.includes("could not be checked") && w.includes("default bot")), "planner: warns when it is unknown whether any are hidden");
+  {
+    const saved = process.env.DISCORD_MCP_GATEWAY;
+    process.env.DISCORD_MCP_GATEWAY = "off";
+    const warned = buildPlan(twoMore, live(undefined)).warnings.find((w) => w.includes("could not be checked")) ?? "";
+    if (saved === undefined) delete process.env.DISCORD_MCP_GATEWAY;
+    else process.env.DISCORD_MCP_GATEWAY = saved;
+    check(/live connection to Discord, which is turned off here/.test(warned) && !/default bot/.test(warned), "planner: with the live connection turned off, the warning says that instead");
+  }
 }
 
 // --- Discord's growth thresholds, split in June 2026 ---

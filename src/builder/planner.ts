@@ -42,6 +42,7 @@ import {
   type Extras,
 } from "./compare.js";
 import { gateBitsFor, gateBitsForType, SEND_FAMILY } from "./overwrites.js";
+import { setting } from "../settings.js";
 
 // The planner. Takes a blueprint plus a snapshot of the live server and
 // produces either an ordered, executable plan or a list of everything
@@ -1484,7 +1485,9 @@ export function buildPlan(
   if (hidden === undefined) {
     warnings.push(
       "Channels hidden from the bot could not be checked for name clashes: whether any " +
-        "exist is only known through the gateway connection of the default bot."
+        (setting("GATEWAY")?.toLowerCase() === "off"
+          ? "exist is only known through the live connection to Discord, which is turned off here."
+          : "exist is only known through the gateway connection of the default bot.")
     );
   } else if (hidden.length > 0) {
     warnings.push(
