@@ -8734,6 +8734,15 @@ try {
     r = await call("undo_change", { only: ["p_two"] });
     check(r.isError && /needs change_id/.test(r.summary), "undo_change: only needs change_id");
     {
+      // The dialog says how many steps: things it does, not lines it shows.
+      const { undoStepCount } = await import("../dist/tools/changes.js");
+      const recreate = { type: "recreate", lines: ["Recreate #general with its settings and permissions.", "It gets a new id.", "Its messages cannot be brought back."] };
+      const skip = { type: "skip", lines: ["#old is already gone."] };
+      const restore = { type: "restore", lines: ["Put #rules back as it was."] };
+      check(undoStepCount([{ actions: [recreate] }]) === 1, "undo dialog: one recreate is one step, however many lines explain it");
+      check(undoStepCount([{ actions: [recreate, skip] }, { actions: [restore] }]) === 2, "undo dialog: what is left as it is is no step; steps add up across changes");
+    }
+    {
       // only's names are compared loosely, in time that grows with their length alone.
       const { looseName } = await import("../dist/tools/changes.js");
       const old = (s) => s.trim().replace(/^[:#@]+|:+$/g, "").toLowerCase();

@@ -2678,11 +2678,13 @@ try {
         console.log("  skipped: no user outside this server to ban; set DISCORD_MCP_ACCEPTANCE_BAN_USER to test lifting a ban.");
       }
 
-      const bulk = await callTool("bulk_update_roles", { action: "assign", role: "omnitest-grant-pow", filter: { is_bot: true } });
-      // The filter matches one member here, the bot, which is an administrator
-      // and gains nothing from a role that lets its holders kick. A preview is
-      // judged on the members it would reach, so it claims nothing new; the
-      // unit suite covers members who do gain.
+      // The filter matches one member, the bot running these tests, through
+      // its own managed role (other bots in the test server are not part of
+      // this). It is an administrator and gains nothing from a role that lets
+      // its holders kick. A preview is judged on the members it would reach,
+      // so it claims nothing new; the unit suite covers members who do gain.
+      const ownRole = (await rawGet(`/guilds/${guildId}/roles`)).find((r) => r.tags?.bot_id === BOT_ID);
+      const bulk = await callTool("bulk_update_roles", { action: "assign", role: "omnitest-grant-pow", filter: { has_role: ownRole?.id ?? "" } });
       expect(bulk.data?.executed === false && /to 1 member\(s\)/.test(bulk.summary ?? "") && !/lets them/.test(bulk.summary ?? ""), "grants: a bulk assignment to someone who already has the power claims nothing new");
     } finally {
       if (privId) await deleteViaTool("delete_channel", "channel", privId);

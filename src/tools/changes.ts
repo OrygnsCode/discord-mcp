@@ -352,6 +352,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       ].filter(Boolean).join(", ");
       if (anything) {
         const stepLines = previews.flatMap((p) => p.actions.flatMap((a) => a.lines));
+        const steps = undoStepCount(previews);
         const gate = gateDestructive({
           tool: "undo_change",
           args: { changes: records.map((r) => r.buildId), guild: guildId, plan: planKey, only: selected ? [...selected].sort((a, b) => a - b) : null },
@@ -367,7 +368,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
             (records.length === 1
               ? `Undo the change made ${when(records[0])}`
               : `Undo ${records.length} changes, newest first, made from ${when(records[records.length - 1])} to ${when(records[0])}`) +
-            `, in ${stepLines.length} step${stepLines.length === 1 ? "" : "s"}:`,
+            `, in ${steps} step${steps === 1 ? "" : "s"}:`,
           note: "The preview lists every step; when you show it, show each line.",
           dialogLines: stepLines,
           previewDetails: previews.map((p) => ({
@@ -466,6 +467,13 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
       );
     })
   );
+}
+
+// How many steps an undo takes: each thing it does, not each line it shows
+// (a recreate is followed by lines on what cannot come back), and not what
+// it leaves as it is.
+export function undoStepCount(previews: ReadonlyArray<{ actions: ReadonlyArray<{ type: string }> }>): number {
+  return previews.reduce((n, p) => n + p.actions.filter((a) => a.type !== "skip").length, 0);
 }
 
 // The entries of a change that names in only point at: an item's id, its
