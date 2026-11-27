@@ -10411,10 +10411,10 @@ try {
   // here has to be added there (telemetry/src/tools.js) and the receiver
   // deployed before a release that has it.
   const { TOOLS } = await import("../telemetry/src/tools.js");
-  const { REGISTRARS } = await import("../dist/server.js");
-  const names = new Set();
-  const recorder = { registerTool: (n) => { names.add(n); return { enabled: true, enable() {}, disable() {}, remove() {}, update() {} }; }, server: { getClientCapabilities: () => ({}) } };
-  for (const register of REGISTRARS) register(recorder, { bots: [{ name: "x", token: "unit-telemetry-names", isDefault: true }], token: "unit-telemetry-names", toolsets: { all: true, groups: [], tools: new Set(), unknown: [] } });
+  const { buildServer } = await import("../dist/server.js");
+  const { selectToolsets } = await import("../dist/toolsets.js");
+  const built = buildServer({ bots: [{ name: "x", token: "unit-telemetry-names", isDefault: true }], token: "unit-telemetry-names", toolsets: selectToolsets(undefined) });
+  const names = new Set(Object.keys(built._registeredTools ?? {}));
   const unknown = [...names].filter((n) => !TOOLS.has(n));
   check(names.size > 100 && unknown.length === 0, `usage: the stats receiver knows every tool by name (missing there: ${unknown.join(", ") || "none"})`);
 }
