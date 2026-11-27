@@ -380,10 +380,16 @@ export function registerCommunityTools(
       })) as APIInvite;
 
       // The roles it gives and who it is for are only told to the server's
-      // own managers, so they are read when the bot is in that server.
+      // own managers, so they are read when the bot is in that server, and
+      // that server is one these tools may use (DISCORD_MCP_ALLOWED_SERVERS).
+      // What anyone with the code can see is answered either way.
       let givesRoles: Array<{ id: string; name: string }> | undefined;
       let targets: string[] | undefined;
-      const inServer = invite.guild ? (await getGuildList(rest)).some((g) => g.id === invite.guild?.id) : false;
+      const guildId = invite.guild?.id;
+      const inServer =
+        guildId !== undefined &&
+        (config.allowedServers === undefined || config.allowedServers.has(guildId)) &&
+        (await getGuildList(rest)).some((g) => g.id === guildId);
       if (inServer && invite.guild) {
         try {
           const listed = (await rest.get(Routes.guildInvites(invite.guild.id))) as APIExtendedInvite[];

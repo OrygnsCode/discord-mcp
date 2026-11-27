@@ -1,5 +1,9 @@
 import { PNG } from "pngjs";
+// @ts-ignore: pngjs's own size-limited inflate, which has no type declarations
+import pngInflate from "pngjs/lib/sync-inflate.js";
 import jpeg from "jpeg-js";
+
+const inflateAtMost = pngInflate as (data: Buffer, options: { chunkSize: number; maxLength: number }) => Buffer;
 
 // Making an image that is over Discord's size limit smaller, so an emoji or
 // sticker from a big picture goes up instead of being refused. Pure
@@ -10,7 +14,8 @@ import jpeg from "jpeg-js";
 // would lose its animation, so those are refused with the reason. The
 // picture's size is read from its header first, and anything past
 // MAX_SIDE on a side is refused before it is decoded, so a small file that
-// claims to be huge cannot make this allocate gigabytes.
+// claims to be huge cannot make this allocate gigabytes. Nor can one whose
+// compressed data unpacks to more than that size (pngUnpacksWithinItsSize).
 
 export const MAX_SHRINK_SOURCE_BYTES = 10 * 1024 * 1024;
 const MAX_SIDE = 4096;
@@ -33,6 +38,66 @@ export function imageDimensions(data: Buffer, type: string): { width: number; he
     }
   }
   return undefined;
+}
+
+// Adam7, the png interlacing: where each of its seven passes starts, and
+// how far apart its pixels are, across and down.
+const ADAM7 = [
+  [0, 0, 8, 8],
+  [4, 0, 8, 8],
+  [0, 4, 4, 8],
+  [2, 0, 4, 4],
+  [0, 2, 2, 4],
+  [1, 0, 2, 2],
+  [0, 1, 1, 2],
+] as const;
+// Samples per pixel for each png color type.
+const PNG_CHANNELS: Readonly<Record<number, number>> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+
+// How many bytes an interlaced png's image data unpacks to, from its header.
+export function interlacedPngSize(width: number, height: number, depth: number, colorType: number): number | undefined {
+  const channels = PNG_CHANNELS[colorType];
+  if (!channels || ![1, 2, 4, 8, 16].includes(depth)) return undefined;
+  let size = 0;
+  for (const [x0, y0, dx, dy] of ADAM7) {
+    const across = width > x0 ? Math.ceil((width - x0) / dx) : 0;
+    const down = height > y0 ? Math.ceil((height - y0) / dy) : 0;
+    // Each row starts with one byte naming its filter.
+    if (across && down) size += down * (1 + Math.ceil((across * channels * depth) / 8));
+  }
+  return size;
+}
+
+// A png's image data: its IDAT chunks, joined.
+function pngImageData(data: Buffer): Buffer | undefined {
+  const parts: Buffer[] = [];
+  let at = 8;
+  while (at + 8 <= data.length) {
+    const length = data.readUInt32BE(at);
+    const type = data.toString("latin1", at + 4, at + 8);
+    const end = at + 8 + length;
+    if (end + 4 > data.length) return undefined;
+    if (type === "IDAT") parts.push(data.subarray(at + 8, end));
+    if (type === "IEND") break;
+    at = end + 4;
+  }
+  return parts.length > 0 ? Buffer.concat(parts) : undefined;
+}
+
+// The decoder unpacks an interlaced png's data with no limit (a plain one it
+// stops at the size its header gives), so a small file could unpack into
+// gigabytes. An interlaced one is unpacked here first, stopping one byte
+// past what its header says it holds: if it reaches that byte, it is refused.
+export function pngUnpacksWithinItsSize(data: Buffer): boolean {
+  if (data.length < 29 || data[28] === 0) return true;
+  const expected = interlacedPngSize(data.readUInt32BE(16), data.readUInt32BE(20), data[24], data[25]);
+  const packed = pngImageData(data);
+  if (expected === undefined || packed === undefined) return false;
+  try {
+    return inflateAtMost(packed, { chunkSize: 64 * 1024, maxLength: expected + 1 }).length <= expected;
+  } catch {
+    return false;
+  }
 }
 
 // An animated png carries an acTL chunk before its image data.
@@ -64,16 +129,27 @@ export function shrinkImage(data: Buffer, type: string, maxBytes: number, side: 
     return { ok: false, error: `The ${label} is ${dims.width}x${dims.height}, larger than the ${MAX_SIDE}x${MAX_SIDE} this can make smaller. Use a smaller file.` };
   }
 
+  const unreadable: Shrunk = { ok: false, error: `The ${label} could not be read as a ${type === "image/png" ? "png" : "jpeg"}.` };
+  if (type === "image/png" && !pngUnpacksWithinItsSize(data)) return unreadable;
   let rgba: Buffer | Uint8Array;
   try {
     if (type === "image/png") {
       rgba = PNG.sync.read(data).data;
     } else {
-      rgba = jpeg.decode(data, { useTArray: true, formatAsRGBA: true, maxResolutionInMP: 17, maxMemoryUsageInMB: 128 }).data;
+      // The decoder's own limits, from the same largest side: a jpeg can
+      // hold more than one frame, and the size checked above is the first's.
+      rgba = jpeg.decode(data, {
+        useTArray: true,
+        formatAsRGBA: true,
+        maxResolutionInMP: Math.ceil((MAX_SIDE * MAX_SIDE) / 1_000_000),
+        maxMemoryUsageInMB: 128,
+      }).data;
     }
   } catch {
-    return { ok: false, error: `The ${label} could not be read as a ${type === "image/png" ? "png" : "jpeg"}.` };
+    return unreadable;
   }
+  // What was decoded must be the size that was checked.
+  if (rgba.length !== dims.width * dims.height * 4) return unreadable;
 
   const { width: w, height: h } = dims;
   const scale = Math.min(1, side / Math.max(w, h));

@@ -21,6 +21,55 @@
 const INVISIBLE =
   /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufeff\uffa0\ufff9-\ufffb]|\udb40[\udc00-\udc7f]/g;
 
+// Characters that can carry words nobody sees, for text kept as it was
+// written (a message, a name, a topic in a tool's data): the tag block
+// outside the short sequence of a subdivision flag, direction overrides
+// and isolates, interlinear annotation marks, and variation selectors
+// stacked after another one. Narrower than INVISIBLE, which is for
+// sentences: real text needs zero-width joiners (emoji, Persian, Indic
+// scripts), a single variation selector, and a flag's own tags.
+const HIDDEN_TEXT =
+  /\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{2,6}\u{E007F}|[\u{E0000}-\u{E007F}\u202A-\u202E\u2066-\u2069\uFFF9-\uFFFB]|[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]{2,}/gu;
+const FLAG = 0x1f3f4;
+const SELECTOR = /^[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+
+export function withoutHiddenText(text: string): { text: string; removed: number } {
+  let removed = 0;
+  const out = text.replace(HIDDEN_TEXT, (found) => {
+    if (found.codePointAt(0) === FLAG) return found;
+    const chars = [...found];
+    // A stack of variation selectors keeps its first.
+    if (SELECTOR.test(found)) {
+      removed += chars.length - 1;
+      return chars[0];
+    }
+    removed += chars.length;
+    return "";
+  });
+  return { text: removed > 0 ? out : text, removed };
+}
+
+// The same, through every string of a tool's data, keys included (some
+// data is keyed by a name, such as a count per category).
+export function withoutHiddenTextIn(value: unknown): { value: unknown; removed: number } {
+  let removed = 0;
+  const clean = (v: unknown, depth: number): unknown => {
+    if (typeof v === "string") {
+      const r = withoutHiddenText(v);
+      removed += r.removed;
+      return r.text;
+    }
+    if (depth > 64 || v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.map((x) => clean(x, depth + 1));
+    if (Object.getPrototypeOf(v) !== Object.prototype && Object.getPrototypeOf(v) !== null) return v;
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) out[clean(k, depth + 1) as string] = clean(x, depth + 1);
+    return out;
+  };
+  const cleaned = clean(value, 0);
+  return { value: removed > 0 ? cleaned : value, removed };
+}
+
 // Line breaks, tabs, and the other control characters, including the
 // Unicode line and paragraph separators.
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;

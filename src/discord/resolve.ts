@@ -6,7 +6,7 @@
 // ignored), prefix, substring. When the winner is not clear the caller
 // gets candidates back instead of a guess.
 
-import { quoted } from "./names.js";
+import { quoted, withoutHiddenText } from "./names.js";
 
 const SNOWFLAKE = /^\d{17,20}$/;
 
@@ -27,8 +27,10 @@ export interface Candidate extends Resolvable {
   score: number;
 }
 
+// Hidden characters are ignored: a tool's data leaves them out of a name
+// (envelope.ts), and the name given back has to find the same item.
 export function normalize(value: string): string {
-  return value.toLowerCase().replace(/[\s\-_#@]/g, "");
+  return withoutHiddenText(value).text.toLowerCase().replace(/[\s\-_#@]/g, "");
 }
 
 export function rankCandidates(
@@ -40,7 +42,7 @@ export function rankCandidates(
   const out: Candidate[] = [];
 
   const scoreName = (name: string): number => {
-    if (name === trimmed) return 90;
+    if (name === trimmed || withoutHiddenText(name).text === trimmed) return 90;
     const itemNorm = normalize(name);
     if (itemNorm === norm) return 80;
     if (norm.length > 0 && itemNorm.startsWith(norm)) return 70;

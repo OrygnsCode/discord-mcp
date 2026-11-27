@@ -262,7 +262,7 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
         change_id: z.string().optional().describe("One change, from list_changes or the tool that made it."),
         since: z.string().optional().describe("ISO date-time: undo every change made at or after it."),
         change_ids: z.array(z.string()).max(50).optional().describe("Several changes."),
-        only: z.array(z.string()).min(1).max(250).optional()
+        only: z.array(z.string().max(200)).min(1).max(250).optional()
           .describe("With change_id: undo only these of its items, by name or id as the preview shows them."),
         dry_run: dryRunParam,
         confirm_token: confirmTokenParam,
@@ -473,17 +473,32 @@ export function registerChangeTools(server: McpServer, config: ServerConfig): vo
 // or for a role given or taken, the role or the member. Entries already
 // undone are left out, and a name that points at nothing left is refused
 // with what the change still holds.
+// A name as only compares it: leading colons, # and @ and trailing colons
+// off, case ignored. Trimmed by walking in from each end, since a pattern
+// for it backtracked over a long run of colons inside a name.
+export function looseName(s: string): string {
+  const t = s.trim();
+  let start = 0;
+  while (start < t.length && (t[start] === ":" || t[start] === "#" || t[start] === "@")) start++;
+  let end = t.length;
+  while (end > start && t[end - 1] === ":") end--;
+  return t.slice(start, end).toLowerCase();
+}
+
 function pickEntries(record: BuildRecord, names: string[]): { ok: true; entries: Set<number> } | { ok: false; error: string } {
-  const norm = (s: string) => s.trim().replace(/^[:#@]+|:+$/g, "").toLowerCase();
   const keys = (e: RecordEntry): string[] =>
     e.op === "member_role"
       ? [e.role, e.name, e.member, e.memberName]
       : [e.id, e.name];
-  const open = record.entries.map((e, i) => ({ e, i })).filter(({ e }) => !isFinished(e));
+  const open = record.entries
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => !isFinished(e))
+    .map(({ e, i }) => ({ e, i, loose: new Set(keys(e).filter((k) => k !== undefined).map((k) => looseName(String(k)))) }));
   const entries = new Set<number>();
   const unknown: string[] = [];
   for (const name of names) {
-    const hits = open.filter(({ e }) => keys(e).some((k) => k !== undefined && norm(String(k)) === norm(name)));
+    const wanted = looseName(name);
+    const hits = open.filter(({ loose }) => loose.has(wanted));
     if (hits.length === 0) unknown.push(name);
     for (const { i } of hits) entries.add(i);
   }
