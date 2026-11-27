@@ -2185,6 +2185,15 @@ try {
       check(up.count === 2 && up.by_category?.Staff === 2, "hidden, tools: with the gateway up, what the list lacks is counted, flagged or not");
       check(hiddenChannelSummary(bot, G, [...list, { id: "3", type: 0, name: "general", parent_id: "1" }, { id: "2", type: 0, name: "mods", parent_id: "1" }]).count === 0, "hidden, tools: nothing is hidden when the list names everything, flag or no flag");
       check(hiddenChannelSummary(other, G, list).count === null, "hidden, tools: for a bot the gateway does not run as it stays unknown");
+      check(/runs for the default bot only/.test(hiddenChannelSummary(other, G, list).note), "hidden, tools: and says the gateway runs for the default bot");
+      {
+        const saved = process.env.DISCORD_MCP_GATEWAY;
+        process.env.DISCORD_MCP_GATEWAY = "off";
+        const note = hiddenChannelSummary(other, G, list).note;
+        if (saved === undefined) delete process.env.DISCORD_MCP_GATEWAY;
+        else process.env.DISCORD_MCP_GATEWAY = saved;
+        check(/live connection to Discord, which is turned off here/.test(note) && !/default bot/.test(note), "hidden, tools: with the live connection turned off, it says that instead");
+      }
       gatewaySeam.assume(bot, { status: "connecting" });
       check(hiddenChannelSummary(bot, G, list).count === 1, "hidden, tools: with the gateway down, only the flagged one");
     } finally {
@@ -6154,6 +6163,7 @@ try {
     };
     writes.length = 0;
   };
+  let guildChannels;
   function route(method, rawPath, opts = {}) {
     const p = rawPath.replace("%40me", "@me");
     let m;
@@ -6163,7 +6173,7 @@ try {
     if (p === `/guilds/${G}` && method === "GET") { guildReads++; return structuredClone(guild); }
     if (p === `/guilds/${G}` && method === "PATCH") { guild = { ...guild, ...opts.body }; return structuredClone(guild); }
     if (p === `/guilds/${G}/roles`) return [{ id: G, name: "@everyone", permissions: String(P.ViewChannel), position: 0 }, { id: BOTROLE, name: "Bot", permissions: String(P.Administrator), position: 9, managed: true }];
-    if (p === `/guilds/${G}/channels`) return [{ id: GENERAL, name: "general", type: 0, position: 0, permission_overwrites: [] }];
+    if (p === `/guilds/${G}/channels`) return structuredClone(guildChannels ?? [{ id: GENERAL, name: "general", type: 0, position: 0, permission_overwrites: [] }]);
     if (p === `/guilds/${G}/members/${BOT}`) return { user: { id: BOT }, roles: [BOTROLE] };
     if ((m = p.match(/^\/guilds\/\d+\/members\/(\d+)$/))) {
       if (!members[m[1]]) throw new Error(`fake Discord: no member ${m[1]}`);
@@ -6218,6 +6228,15 @@ try {
     guild.incidents_data = { invites_disabled_until: null, dms_disabled_until: null, raid_detected_at: "2026-11-10T01:02:03.000Z" };
     o = await call("get_server_overview");
     check(o.data.incidents?.raid_detected_at === "2026-11-10T01:02:03.000Z" && o.data.incidents.dm_spam_detected_at === null, "overview: a flagged raid the same");
+    check(o.summary.includes(" online), 1 channel in 0 categories, "), `overview: one channel and no category, in the singular (${o.summary})`);
+    guildChannels = [
+      { id: "700000000000000901", name: "Info", type: 4, position: 0, permission_overwrites: [] },
+      { id: GENERAL, name: "general", type: 0, position: 0, parent_id: "700000000000000901", permission_overwrites: [] },
+      { id: "700000000000000902", name: "Lounge", type: 2, position: 1, permission_overwrites: [] },
+    ];
+    o = await call("get_server_overview");
+    check(/, 2 channels in 1 category, /.test(o.summary) && o.data.categories.length === 1 && o.data.uncategorized.length === 1, `overview: categories are not counted as channels (${o.summary})`);
+    guildChannels = undefined;
   }
   // Each of these takes a token, and only end_poll (always confirmed) is marked destructive.
   for (const name of ["remove_timeout", "set_incident_actions", "update_automod_rule", "update_event", "update_server"]) {

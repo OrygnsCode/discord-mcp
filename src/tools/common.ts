@@ -37,7 +37,7 @@ import {
   textFromComponents,
 } from "../discord/components.js";
 import { fail } from "../envelope.js";
-import { settingSource } from "../settings.js";
+import { setting, settingSource } from "../settings.js";
 import { gatewayKeepsCacheFresh, isGatewayBot } from "../discord/gateway.js";
 import { MessageLinkError, parseMessageLink, rememberMessageLink } from "../discord/messageLinks.js";
 import { oneLine, quoted } from "../discord/names.js";
@@ -782,8 +782,11 @@ export function hiddenChannelSummary(
     return {
       count: null,
       note:
-        "Unknown whether any channels are hidden from this bot: that comes from the " +
-        "gateway connection, which runs for the default bot only.",
+        setting("GATEWAY")?.toLowerCase() === "off"
+          ? "Unknown whether any channels are hidden from this bot: that comes from the " +
+            "live connection to Discord, which is turned off here."
+          : "Unknown whether any channels are hidden from this bot: that comes from the " +
+            "gateway connection, which runs for the default bot only.",
     };
   }
   const categories = new Map(

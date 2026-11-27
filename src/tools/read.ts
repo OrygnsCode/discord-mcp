@@ -155,9 +155,12 @@ export function registerReadTools(
       ].filter(Boolean);
       const flagged = Boolean(incidents?.raid_detected_at || incidents?.dm_spam_detected_at);
 
+      // Categories are channels to Discord, but not to a person reading this.
+      const channelCount = channels.filter((c) => c.type !== 4).length;
       return ok(
         `${quoted(guildData.name)}: ${members} members (${online} online), ` +
-          `${channels.length} channels in ${categories.length} categories, ` +
+          `${channelCount} channel${channelCount === 1 ? "" : "s"} in ${categories.length} ` +
+          `categor${categories.length === 1 ? "y" : "ies"}, ` +
           `${guildData.roles.length} roles, boost tier ${guildData.premium_tier}.` +
           ` Slots used: ${of(slots.emoji_static)} static emoji, ${of(slots.emoji_animated)} animated, ${of(slots.stickers)} stickers` +
           (slots.sounds ? `, ${of(slots.sounds)} sounds.` : ".") +
