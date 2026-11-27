@@ -28,8 +28,11 @@ const migration = readFileSync(join(here, "migrations", "0001_init.sql"), "utf8"
 
 async function start(bindings = { STATS_TOKEN: "test-stats-token" }, limit = 1000) {
   const mf = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    scriptPath: join(here, "src", "worker.js"),
+    modulesRoot: here,
+    modules: [
+      { type: "ESModule", path: join(here, "src", "worker.js") },
+      { type: "ESModule", path: join(here, "src", "tools.js") },
+    ],
     compatibilityDate: "2025-11-01",
     d1Databases: { DB: "local-test" },
     bindings,
@@ -123,18 +126,24 @@ try {
   check((await count(today, "os", "other")) === 1 && (await count(today, "app", "other")) === 1 && (await count(today, "install", "other")) === 1 && (await count(today, "version", "other")) === 1 && (await count(today, "bots", "other")) === 1 && (await count(today, "servers", "unknown")) === 1 && (await count(today, "largest", "unknown")) === 1 && (await count(today, "ctx", "other")) === 1, "values outside the lists are counted as other or unknown");
   check((await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE key LIKE '%script%' OR key LIKE '%evil%' OR key LIKE '%plan9%'").first()).c === 0, "and never stored as sent");
   await send("/discord-mcp/v1/ping", report({ days: [
-    { d: daysAgo(2), tools: { "DROP TABLE x": "1-9", ok_tool: "999", fine_tool: "1-9", ["a".repeat(60)]: "1-9" }, gate: { approve_all: "1-9" }, errors: { "<x>": "1-9" }, apps: ["evil", "cursor"] },
+    { d: daysAgo(2), tools: { "DROP TABLE x": "1-9", ok_tool: "999", list_roles: "1-9", ["a".repeat(60)]: "10-99", made_up_tool: "1-9" }, gate: { approve_all: "1-9" }, errors: { "<x>": "1-9" }, apps: ["evil", "cursor"] },
     { d: daysAgo(2), tools: { twice: "1-9" } },
     { d: daysAgo(-5), tools: { future: "1-9" } },
     { d: daysAgo(100), tools: { ancient: "1-9" } },
     { d: "yesterday", tools: { words: "1-9" } },
   ] }));
   const d2 = daysAgo(2);
-  check((await count(d2, "tool", "fine_tool|1-9")) === 1 && (await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE key LIKE 'DROP%' OR key LIKE 'ok_tool%' OR key LIKE 'aaaa%' OR key LIKE 'approve%' OR key LIKE '<x>%' OR key LIKE 'twice%' OR key LIKE 'future%' OR key LIKE 'ancient%' OR key LIKE 'words%'").first()).c === 0, "tool names, bands and days outside the rules are dropped");
+  check((await count(d2, "tool", "list_roles|1-9")) === 1 && (await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE key LIKE 'DROP%' OR key LIKE 'ok_tool%' OR key LIKE 'aaaa%' OR key LIKE 'made_up%' OR key LIKE 'approve%' OR key LIKE '<x>%' OR key LIKE 'twice%' OR key LIKE 'future%' OR key LIKE 'ancient%' OR key LIKE 'words%'").first()).c === 0, "tool names, bands and days outside the rules are never stored");
+  check((await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE day = ?1 AND metric = 'tool' AND key LIKE 'other|%'").bind(d2).first()).c === 1, "a name that is not a tool is counted once as other, whatever it was");
   check((await count(d2, "active_app", "other")) === 1 && (await count(d2, "active_app", "cursor")) === 1, "and unknown apps count as other");
-  const many = Array.from({ length: 12 }, (_, i) => ({ d: daysAgo(i + 3), tools: { many_days: "1-9" } }));
+  const many = Array.from({ length: 12 }, (_, i) => ({ d: daysAgo(i + 3), tools: { find: "100+" } }));
   await send("/discord-mcp/v1/ping", report({ days: many }));
-  check((await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE metric = 'tool' AND key = 'many_days|1-9'").first()).c === 7, "at most seven days per report");
+  check((await db.prepare("SELECT COUNT(*) AS c FROM daily WHERE metric = 'tool' AND key = 'find|100+'").first()).c === 7, "at most seven days per report");
+  // A flood of made-up names adds no rows: they all fold into one.
+  const rowsBefore = (await db.prepare("SELECT COUNT(*) AS c FROM daily").first()).c;
+  await send("/discord-mcp/v1/ping", report({ days: Array.from({ length: 7 }, (_, i) => ({ d: daysAgo(i + 20), tools: Object.fromEntries(Array.from({ length: 250 }, (_, t) => [`qx${t}`, "1-9"])), failed: Object.fromEntries(Array.from({ length: 250 }, (_, t) => [`zz${t}`, "1-9"])) })) }));
+  const rowsAfter = (await db.prepare("SELECT COUNT(*) AS c FROM daily").first()).c;
+  check(rowsAfter - rowsBefore <= 7 * 3 + 1, `a report of 3,500 made-up names adds a handful of rows, not thousands (${rowsAfter - rowsBefore})`);
 
   // Reports that are not reports.
   check((await send("/discord-mcp/v1/ping", "{not json")).status === 400, "not JSON: 400");
@@ -142,10 +151,13 @@ try {
   check((await send("/discord-mcp/v1/ping", { ...report(), s: 2 })).status === 400, "an unknown schema: 400");
   check((await send("/discord-mcp/v1/ping", { ...report(), pad: "x".repeat(70_000) })).status === 413, "too large: 413");
   // A week of every tool every day, as the client sends it at most.
-  const heavy = report({ days: Array.from({ length: 7 }, (_, i) => ({ d: daysAgo(i + 1), tools: Object.fromEntries(Array.from({ length: 160 }, (_, t) => [`tool_name_number_${t}`, "10-99"])), gate: { preview: "1-9" }, errors: { other: "1-9" }, apps: ["cursor"] })) });
+  const { TOOLS } = await import("../src/tools.js");
+  const names = [...TOOLS];
+  const heavy = report({ days: Array.from({ length: 7 }, (_, i) => ({ d: daysAgo(i + 1), tools: Object.fromEntries(names.map((n) => [n, "10-99"])), failed: Object.fromEntries(names.map((n) => [n, "1-9"])), gate: { preview: "1-9" }, errors: { other: "1-9" }, apps: ["cursor"] })) });
   const heavyBody = JSON.stringify(heavy);
   res = await send("/discord-mcp/v1/ping", heavyBody);
-  check(heavyBody.length < 60_000 && res.status === 204 && (await count(daysAgo(7), "tool", "tool_name_number_159|10-99")) === 1, `a heavy week fits and is counted (${heavyBody.length} bytes)`);
+  const last = names.at(-1);
+  check(heavyBody.length < 64 * 1024 && res.status === 204 && (await count(daysAgo(7), "tool", `${last}|10-99`)) === 1 && (await count(daysAgo(7), "tool_failed", `${last}|1-9`)) === 1, `a week of every tool, used and failed, fits and is counted in full (${heavyBody.length} bytes)`);
 
   // Development and setup.
   const before = await count(today, "pings");
@@ -223,6 +235,20 @@ try {
   check(burst.every((s) => s === 204) && counted === 3, `past the limit, reports are answered but not counted (${counted} of 5)`);
   await limited.mf.dispose();
 
+  // IPv6: one network picks its own addresses, so it is counted as one.
+  const { limitKey } = await import("../src/worker.js");
+  check(limitKey("198.51.100.9") === "198.51.100.9" && limitKey("::ffff:198.51.100.9") === "198.51.100.9", "rate limit: an IPv4 address is its own key, also written the IPv6 way");
+  check(limitKey("2001:db8:1:2:aaaa::1") === limitKey("2001:0db8:0001:0002:ffff:ffff:ffff:ffff") && limitKey("2001:db8:1:2::1") === "2001:db8:1:2::/64", "rate limit: IPv6 addresses in one /64 share a key");
+  check(limitKey("2001:db8:1:3::1") !== limitKey("2001:db8:1:2::1") && limitKey("2001:db8::1") === "2001:db8:0:0::/64", "rate limit: and another /64 has its own");
+  const v6 = await start(undefined, 3);
+  const v6burst = [];
+  for (let i = 0; i < 5; i += 1) {
+    v6burst.push((await v6.mf.dispatchFetch("http://localhost/discord-mcp/v1/ping", { method: "POST", headers: { "cf-connecting-ip": `2001:db8:5:6::${(i + 1).toString(16)}` }, body: JSON.stringify(report()) })).status);
+  }
+  const v6counted = (await v6.db.prepare("SELECT n FROM daily WHERE day = ?1 AND metric = 'pings'").bind(today).first())?.n ?? 0;
+  check(v6counted === 3, `rate limit: changing the last 64 bits does not get past it (${v6counted} of 5)`);
+  await v6.mf.dispose();
+
   // Daily pruning.
   await db.prepare("INSERT INTO nonces (nonce, seen, fresh) VALUES ('old', ?1, 0)").bind(daysAgo(4)).run();
   await db.prepare("INSERT INTO log (ts, kind, body) VALUES (?1, 'ping', '{}')").bind(new Date(Date.now() - 8 * 86_400_000).toISOString()).run();
@@ -233,8 +259,11 @@ try {
 
   // A report from the real client code, over HTTP.
   const served = new Miniflare(convertV4MiniflareOptions({
-    modules: true,
-    scriptPath: join(here, "src", "worker.js"),
+    modulesRoot: here,
+    modules: [
+      { type: "ESModule", path: join(here, "src", "worker.js") },
+      { type: "ESModule", path: join(here, "src", "tools.js") },
+    ],
     compatibilityDate: "2025-11-01",
     d1Databases: { DB: "local-client" },
     bindings: { STATS_TOKEN: "t" },

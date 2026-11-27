@@ -1,0 +1,38 @@
+// Every tool name a published version of discord-mcp reports. A name not
+// here is counted as 'other', so a report cannot add rows of its own making.
+// The main unit suite fails while a tool is missing from this list: deploy
+// the receiver with the new names before releasing a version that adds one.
+export const TOOLS = new Set([
+  'add_reactions', 'add_thread_member', 'assign_role', 'audit_server_security', 'ban_member', 'bulk_ban',
+  'bulk_delete_messages', 'bulk_update_roles', 'cancel_event', 'cancel_scheduled_message', 'catch_up',
+  'clear_channel_permissions', 'clear_reactions', 'clone_channel', 'clone_role', 'create_automod_rule',
+  'create_channel', 'create_emoji', 'create_event', 'create_forum_post', 'create_forum_tag', 'create_invite',
+  'create_poll', 'create_role', 'create_server_template', 'create_soundboard_sound', 'create_sticker',
+  'create_thread', 'create_webhook', 'crosspost_message', 'delete_app_command', 'delete_automod_rule',
+  'delete_blueprint', 'delete_channel', 'delete_emoji', 'delete_forum_post', 'delete_forum_tag',
+  'delete_integration', 'delete_invite', 'delete_message', 'delete_role', 'delete_server_template',
+  'delete_soundboard_sound', 'delete_sticker', 'delete_thread', 'delete_webhook', 'diff_blueprint',
+  'disconnect_member', 'edit_message', 'end_poll', 'end_stage', 'execute_build_plan', 'explain_permissions',
+  'export_server_blueprint', 'find', 'follow_announcement_channel', 'forward_message', 'get_audit_log',
+  'get_blueprint', 'get_bot_info', 'get_channel', 'get_channel_access', 'get_channel_permissions',
+  'get_event', 'get_event_attendees', 'get_invite', 'get_member', 'get_member_access',
+  'get_member_permissions', 'get_message', 'get_onboarding', 'get_poll_results', 'get_rate_limit_status',
+  'get_reactions', 'get_recent_events', 'get_reference_layout', 'get_role_members', 'get_server_overview',
+  'get_server_preview', 'get_server_widget', 'get_thread', 'get_welcome_screen', 'import_server_template',
+  'kick_member', 'leave_server', 'list_app_commands', 'list_automod_rules', 'list_bans', 'list_blueprints',
+  'list_changes', 'list_channels', 'list_emojis', 'list_event_subscriptions', 'list_events',
+  'list_forum_posts', 'list_integrations', 'list_invites', 'list_members', 'list_pinned_messages',
+  'list_reference_layouts', 'list_roles', 'list_scheduled_messages', 'list_server_templates', 'list_servers',
+  'list_soundboard_sounds', 'list_stages', 'list_stickers', 'list_thread_members', 'list_threads',
+  'list_voice_members', 'list_webhooks', 'lock_channel', 'pin_message', 'plan_server_build', 'prune_members',
+  'read_messages', 'register_app_command', 'remove_reaction', 'remove_role', 'remove_thread_member',
+  'remove_timeout', 'reorder_channels', 'reorder_roles', 'reply_to_forum_post', 'run_setup_check',
+  'save_blueprint', 'schedule_message', 'search_members', 'search_messages', 'send_dm', 'send_message',
+  'send_webhook_message', 'set_bot_presence', 'set_channel_permissions', 'set_incident_actions',
+  'set_voice_channel_status', 'start_stage', 'subscribe_events', 'sync_server_template', 'timeout_member',
+  'unban_member', 'undo_change', 'unlock_channel', 'unpin_message', 'unsubscribe_events',
+  'update_app_command', 'update_automod_rule', 'update_bot_profile', 'update_channel', 'update_emoji',
+  'update_event', 'update_forum_post', 'update_forum_tag', 'update_member', 'update_onboarding',
+  'update_role', 'update_server', 'update_server_widget', 'update_soundboard_sound', 'update_stage',
+  'update_sticker', 'update_thread', 'update_webhook', 'update_welcome_screen',
+]);

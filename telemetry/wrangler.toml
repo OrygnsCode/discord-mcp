@@ -21,7 +21,7 @@ name = "PING_LIMIT"
 namespace_id = "2101"
 
   [ratelimits.simple]
-  limit = 30
+  limit = 10
   period = 60
 
 # Daily: forget report numbers after three days, the log after seven.

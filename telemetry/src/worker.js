@@ -12,11 +12,16 @@
 // checked against a fixed list or pattern; anything else is counted as
 // "other" or dropped, so a report can never add a row of its own making.
 
+import { TOOLS } from './tools.js';
+
 const SCHEMA = 1;
 const BASE = '/discord-mcp/v1';
 const MAX_BODY = 64 * 1024;
 const MAX_DAYS = 7;
 const MAX_TOOLS = 250;
+// The most rows one report adds to: a week of every tool, used and failed,
+// the most a client sends. A real report adds a few dozen.
+const MAX_ROWS = 2600;
 const LOG_DAYS = 7;
 const NONCE_DAYS = 3;
 const DAY_MS = 86_400_000;
@@ -24,7 +29,6 @@ const DAY_MS = 86_400_000;
 const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,32})?$/;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const NONCE_RE = /^[0-9a-f]{32}$/;
-const TOOL_RE = /^[a-z][a-z0-9_-]{0,47}$/;
 const COUNTRY_RE = /^[A-Z][A-Z0-9]$/;
 
 const OS = new Set(['windows', 'macos', 'linux', 'other']);
@@ -102,7 +106,7 @@ async function receive(request, env, kind) {
   // the limit. The address is only the limiter's key and is never stored.
   const address = request.headers.get('cf-connecting-ip');
   if (address && env.PING_LIMIT) {
-    const { success } = await env.PING_LIMIT.limit({ key: address });
+    const { success } = await env.PING_LIMIT.limit({ key: limitKey(address) });
     if (!success) return new Response(null, { status: 204 });
   }
 
@@ -165,17 +169,34 @@ function version(value) {
   return typeof value === 'string' && VERSION_RE.test(value) ? value : 'other';
 }
 
-function bandMap(value, keys) {
+// A key not on the list is dropped, or, with fold, counted once as 'other'.
+function bandMap(value, keys, fold = false) {
   const out = {};
   if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
   let n = 0;
   for (const [k, band] of Object.entries(value)) {
     if (n >= MAX_TOOLS) break;
-    if (!(keys instanceof Set ? keys.has(k) : keys.test(k)) || !COUNTS.has(band)) continue;
-    out[k] = band;
+    if (!COUNTS.has(band)) continue;
+    const key = keys.has(k) ? k : fold ? 'other' : undefined;
+    if (key === undefined || key in out) continue;
+    out[key] = band;
     n += 1;
   }
   return out;
+}
+
+// What the rate limit counts an address under: an IPv4 address itself, and
+// an IPv6 address by its first 64 bits, the part a network is given (every
+// device on it picks the rest, so one sender can use as many as it likes).
+export function limitKey(address) {
+  if (!address.includes(':')) return address;
+  // An IPv4 address written the IPv6 way.
+  if (address.includes('.')) return address.slice(address.lastIndexOf(':') + 1);
+  const [head, tail = ''] = address.split('::');
+  const front = head ? head.split(':') : [];
+  const back = address.includes('::') && tail ? tail.split(':') : [];
+  const groups = address.includes('::') ? [...front, ...Array(Math.max(0, 8 - front.length - back.length)).fill('0'), ...back] : front;
+  return `${groups.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16)).join(':')}::/64`;
 }
 
 // The report reduced to what is allowed. A finished day is only taken from
@@ -192,8 +213,8 @@ export function cleanPing(body, now) {
     seen.add(d.d);
     days.push({
       d: d.d,
-      tools: bandMap(d.tools, TOOL_RE),
-      failed: bandMap(d.failed, TOOL_RE),
+      tools: bandMap(d.tools, TOOLS, true),
+      failed: bandMap(d.failed, TOOLS, true),
       gate: bandMap(d.gate, GATE),
       errors: bandMap(d.errors, ERRORS),
       apps: [...new Set((Array.isArray(d.apps) ? d.apps : []).slice(0, 10).map((a) => pick(a, APPS)))],
@@ -268,7 +289,7 @@ export function pingRows(r, today, country) {
     for (const [cls, band] of Object.entries(d.errors)) rows.push([d.d, 'error', `${cls}|${band}`]);
     for (const app of d.apps) rows.push([d.d, 'active_app', app]);
   }
-  return rows;
+  return rows.slice(0, MAX_ROWS);
 }
 
 export function setupRows(r, today) {
