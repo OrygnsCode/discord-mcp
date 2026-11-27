@@ -2947,6 +2947,15 @@ try {
   check(topic.calls.length === 1 && topic.calls[0].method === "PATCH" && topic.calls[0].route === "/channels/700000000000000202", "executor: a channel's settings go in one request");
   check(JSON.stringify(topic.calls[0].body) === JSON.stringify({ topic: "welcome", rate_limit_per_user: 10 }), "executor: the request carries only the listed changes");
   check(topic.report.updated === 1 && topic.report.results.find((r) => r.status === "updated")?.changes?.length === 2, "executor: the report lists each change");
+  {
+    // The record is handed over after every step that adds to it, so a run
+    // cut off partway can still be undone as far as it got.
+    const bp = { roles: [{ name: "Fresh Role" }], channels: [{ name: "fresh-one" }, { name: "fresh-two" }] };
+    const planned = buildPlan(bp, live, { updateExisting: true });
+    const told = [];
+    const report = await executePlan(fakeRest(), G, BOT, bp, planned.steps, roles, channels, { onStep: (entries) => told.push(entries.length) });
+    check(JSON.stringify(told) === JSON.stringify([1, 2, 3]) && report.record.length === 3, `executor: the record is handed over after each step that adds to it (${told.join(",")})`);
+  }
 
   const lock = await run({ channels: [{ name: "general", private_to: ["Mod"] }] });
   const puts = lock.calls.filter((c) => c.method === "PUT");
@@ -5759,6 +5768,11 @@ try {
   roles[1].name = "Helpers Renamed";
   r = await call("execute_build_plan", { plan_id: planId });
   check(!r.isError && writes.some((w) => w.method === "POST" && w.body.name === "reports" && (BigInt(w.body.permission_overwrites[0].allow) & P.ManageWebhooks) !== 0n), `execute_build_plan: the staged plan builds it (${r.summary})`);
+  {
+    const { listRecords, getRecord } = await import("../dist/builder/records.js");
+    const id = r.data?.change_id;
+    check(typeof id === "string" && (getRecord(G, id)?.entries.length ?? 0) >= 1 && listRecords(G).filter((x) => x.buildId === id).length === 1, `execute_build_plan: the record kept along the way is the one it finishes with, once (${id})`);
+  }
   r = await call("execute_build_plan", { plan_id: planId });
   check(r.isError && /already been executed/.test(r.summary), "execute_build_plan: such a plan runs once");
   r = await call("execute_build_plan", { blueprint: powers });

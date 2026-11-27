@@ -156,6 +156,10 @@ export async function executePlan(
     // Server settings that point at channels, by Discord field name when
     // undo can restore them.
     channelUses?: Array<{ id: string; use: string; field?: string }>;
+    // Told the record so far after every step, so it can be kept as the run
+    // goes: a run cut off partway (a client that stops waiting, a process
+    // that ends) still leaves what it did for undo.
+    onStep?: (record: readonly RecordEntry[]) => void;
   } = {}
 ): Promise<BuildReport> {
   const settable = options.settable;
@@ -291,6 +295,7 @@ export async function executePlan(
   };
 
   let halted = false;
+  let told = 0;
 
   for (const step of steps) {
     if (halted) {
@@ -656,6 +661,11 @@ export async function executePlan(
         error: message + partial,
       });
       halted = true;
+    }
+    // Only when the step added something to undo.
+    if (record.length !== told) {
+      told = record.length;
+      options.onStep?.(record);
     }
   }
 

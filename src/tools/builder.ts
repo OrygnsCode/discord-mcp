@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { quoted } from "../discord/names.js";
 import { Routes } from "discord-api-types/v10";
@@ -20,7 +21,7 @@ import {
 import { executePlan } from "../builder/executor.js";
 import { checkAfterBuild } from "../builder/verify.js";
 import { REFERENCE_LAYOUTS, getLayout } from "../builder/layouts.js";
-import { itemLabel, saveRecord, type ItemKind } from "../builder/records.js";
+import { itemLabel, saveRecord, type ItemKind, type RecordEntry } from "../builder/records.js";
 import {
   consumePlan,
   getPlan,
@@ -525,6 +526,21 @@ export function registerBuilderTools(
         }
       }
 
+      // The record undo_change works from, kept after every step under one
+      // id, so a run that is cut off partway can still be undone as far as
+      // it got. The last save, below, is the whole run.
+      const changeId = randomBytes(8).toString("hex");
+      const startedAt = Date.now();
+      const keep = (entries: readonly RecordEntry[]) =>
+        saveRecord({
+          buildId: changeId,
+          guildId,
+          botUserId: live.botUserId,
+          createdAt: startedAt,
+          tool: "execute_build_plan",
+          ...(plan ? { planId: plan.planId } : {}),
+          entries: [...entries],
+        });
       const report = await executePlan(
         rest,
         guildId,
@@ -536,6 +552,14 @@ export function registerBuilderTools(
         {
           settable: live.botPermissions === ALL_PERMISSIONS ? undefined : live.botPermissions,
           channelUses: live.channelUses,
+          onStep: (entries) => {
+            if (entries.length === 0) return;
+            try {
+              keep(entries);
+            } catch {
+              // The save after the run reports it if it keeps failing.
+            }
+          },
         }
       );
       invalidateGuildCaches(guildId);
@@ -545,14 +569,7 @@ export function registerBuilderTools(
       let buildId: string | undefined;
       if (report.record.length > 0) {
         try {
-          buildId = saveRecord({
-            guildId,
-            botUserId: live.botUserId,
-            createdAt: Date.now(),
-            tool: "execute_build_plan",
-            ...(plan ? { planId: plan.planId } : {}),
-            entries: report.record,
-          }).buildId;
+          buildId = keep(report.record).buildId;
         } catch {
           report.warnings.push("The build record could not be saved, so undo_change cannot reverse this build.");
         }
