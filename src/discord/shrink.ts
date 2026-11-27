@@ -1,9 +1,6 @@
+import { inflateSync } from "node:zlib";
 import { PNG } from "pngjs";
-// @ts-ignore: pngjs's own size-limited inflate, which has no type declarations
-import pngInflate from "pngjs/lib/sync-inflate.js";
 import jpeg from "jpeg-js";
-
-const inflateAtMost = pngInflate as (data: Buffer, options: { chunkSize: number; maxLength: number }) => Buffer;
 
 // Making an image that is over Discord's size limit smaller, so an emoji or
 // sticker from a big picture goes up instead of being refused. Pure
@@ -86,15 +83,16 @@ function pngImageData(data: Buffer): Buffer | undefined {
 
 // The decoder unpacks an interlaced png's data with no limit (a plain one it
 // stops at the size its header gives), so a small file could unpack into
-// gigabytes. An interlaced one is unpacked here first, stopping one byte
-// past what its header says it holds: if it reaches that byte, it is refused.
+// gigabytes. An interlaced one is unpacked here first, allowed no more than
+// what its header says it holds: zlib stops and throws past that, and the
+// file is refused.
 export function pngUnpacksWithinItsSize(data: Buffer): boolean {
   if (data.length < 29 || data[28] === 0) return true;
   const expected = interlacedPngSize(data.readUInt32BE(16), data.readUInt32BE(20), data[24], data[25]);
   const packed = pngImageData(data);
   if (expected === undefined || packed === undefined) return false;
   try {
-    return inflateAtMost(packed, { chunkSize: 64 * 1024, maxLength: expected + 1 }).length <= expected;
+    return inflateSync(packed, { maxOutputLength: Math.max(1, expected) }).length <= expected;
   } catch {
     return false;
   }

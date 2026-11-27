@@ -8317,6 +8317,24 @@ try {
     check(pngUnpacksWithinItsSize(real) && PNG.sync.read(real).width === W, "interlaced: a real interlaced png unpacks within its size");
     s = shrinkImage(real, "image/png", 262144, 128, "image");
     check(s.ok && s.width === 128 && s.height === 96 && PNG.sync.read(s.data).data[0] === 255, `interlaced: and is made smaller like any other (${s.ok ? `${s.width}x${s.height}` : s.error})`);
+    // A photo-like one: every pixel different, so its data hardly compresses.
+    // (A one-color image passed where a real picture was refused.)
+    {
+      const passes = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]];
+      const { randomBytes } = await import("node:crypto");
+      for (const [w, h] of [[64, 64], [100, 100], [400, 400]]) {
+        const rows = [];
+        for (const [x0, y0, dx, dy] of passes) {
+          const across = w > x0 ? Math.ceil((w - x0) / dx) : 0;
+          const down = h > y0 ? Math.ceil((h - y0) / dy) : 0;
+          if (!across || !down) continue;
+          for (let r = 0; r < down; r++) rows.push(Buffer.concat([Buffer.from([0]), randomBytes(across * 4)]));
+        }
+        const photo = interlaced(w, h, Buffer.concat(rows));
+        const shrunk = shrinkImage(photo, "image/png", 262144, 128, "image");
+        check(pngUnpacksWithinItsSize(photo) && PNG.sync.read(photo).width === w && shrunk.ok && shrunk.width === Math.min(w, 128), `interlaced: a ${w}x${w} picture with every pixel different is read and made emoji-sized (${shrunk.ok ? `${shrunk.width}x${shrunk.height}` : shrunk.error})`);
+      }
+    }
     // A bomb: the header says 64x64, the data unpacks to 40 MB.
     const bomb = interlaced(64, 64, Buffer.alloc(40 * 1024 * 1024));
     const started = Date.now();
